@@ -1,0 +1,113 @@
+use regex::Regex;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
+use walkdir::WalkDir;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LocalMediaItem {
+    pub id: String,
+    pub path: String,
+    pub filename: String,
+    pub parsed_title: String,
+    pub season: Option<u32>,
+    pub episode: Option<u32>,
+    pub media_type: String, // "anime", "movie", "tv"
+    pub size_bytes: u64,
+    pub extension: String,
+    pub last_modified: u64,
+}
+
+pub fn scan_folder(folder_path: &str, media_type: &str) -> Vec<LocalMediaItem> {
+    let mut items = Vec::new();
+    let root = Path::new(folder_path);
+
+    if !root.exists() || !root.is_dir() {
+        return items;
+    }
+
+    // Video extension check
+    let valid_exts = ["mp4", "mkv", "avi", "webm", "m4v", "mov"];
+
+    // Regex for parsing patterns like S01E05, 1x05, - 05, Ep 05
+    let re_season_ep = Regex::new(r"(?i)[sS](\d+)[eE](\d+)").unwrap();
+    let re_episode_only = Regex::new(r"(?i)(?:ep|e|-)\s*(\d{1,4})").unwrap();
+
+    for entry in WalkDir::new(root).into_iter().filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.is_file() {
+            if let Some(ext) = path.extension().and_then(|s| s.to_str()) {
+                let ext_lower = ext.to_lowercase();
+                if valid_exts.contains(&ext_lower.as_str()) {
+                    let filename = path
+                        .file_name()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let metadata = entry.metadata().ok();
+                    let size_bytes = metadata.as_ref().map(|m| m.len()).unwrap_or(0);
+                    let last_modified = metadata
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+
+                    // Parse title and season/episode numbers
+                    let stem = path
+                        .file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_string();
+                    let mut season = None;
+                    let mut episode = None;
+
+                    if let Some(caps) = re_season_ep.captures(&stem) {
+                        season = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
+                        episode = caps.get(2).and_then(|m| m.as_str().parse::<u32>().ok());
+                    } else if let Some(caps) = re_episode_only.captures(&stem) {
+                        episode = caps.get(1).and_then(|m| m.as_str().parse::<u32>().ok());
+                    }
+
+                    // Clean title: remove release group brackets like [SubsPlease] or [1080p]
+                    let re_brackets =
+                        Regex::new(r"\[.*?\]|\(.*?\)|1080p|720p|4k|x264|x265|hevc|web-dl|bluray")
+                            .unwrap();
+                    let clean_title = re_brackets.replace_all(&stem, "").trim().to_string();
+                    let clean_title_final = clean_title
+                        .replace('.', " ")
+                        .replace('_', " ")
+                        .trim()
+                        .to_string();
+
+                    let id = format!("{:x}", md5_hash(&path.to_string_lossy()));
+
+                    items.push(LocalMediaItem {
+                        id,
+                        path: path.to_string_lossy().to_string(),
+                        filename,
+                        parsed_title: if clean_title_final.is_empty() {
+                            stem
+                        } else {
+                            clean_title_final
+                        },
+                        season,
+                        episode,
+                        media_type: media_type.to_string(),
+                        size_bytes,
+                        extension: ext_lower,
+                        last_modified,
+                    });
+                }
+            }
+        }
+    }
+
+    items
+}
+
+fn md5_hash(input: &str) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    input.hash(&mut hasher);
+    hasher.finish()
+}
