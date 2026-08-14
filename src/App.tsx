@@ -1,35 +1,60 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from "react";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
-import { ViewMode, MediaItem, Episode, StreamProgress, UserProfile, AppSettings, Collection, DownloadTask, LocalMediaItem, TorrentResult, MediaType, TorrentFileItem, StreamInfo, TorrentAddResult } from "./types";
+import { ViewMode, MediaItem, Episode, StreamProgress, UserProfile, AppSettings, Collection, DownloadTask, LocalMediaItem, TorrentResult, MediaType, TorrentFileItem, StreamInfo, ScanLibraryResult } from "./types";
 import { StorageService } from "./services/storage";
 import { AniListService } from "./services/anilist";
 import { TMDBService } from "./services/tmdb";
-import { isTauri, invokeTauri } from "./services/tauri";
+import { invokeTauri } from "./services/tauri";
 import { selectBestTorrent } from "./services/torrentRank";
 import { applyAccentColor } from "./utils/theme";
+import {
+  buildSearchInvokeArgs,
+  findRememberedTorrent,
+  isValidMagnet,
+  rememberSuccessfulStream,
+  rememberedToTorrent,
+  resolvePlayEpisode,
+  toResumeTorrent,
+} from "./services/playback";
 
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
-import { TorrentPickerModal } from "./components/TorrentPickerModal";
 import { VideoPlayer } from "./components/VideoPlayer";
-import { AniListModal } from "./components/AniListModal";
-import { OnboardingModal } from "./components/OnboardingModal";
 import { ContextMenu, ContextMenuState } from "./components/ContextMenu";
 import { CommandPalette } from "./components/CommandPalette";
-
 import { HomeView } from "./views/HomeView";
-import { AnimeView } from "./views/AnimeView";
-import { MoviesView } from "./views/MoviesView";
-import { TvView } from "./views/TvView";
-import { LibraryView } from "./views/LibraryView";
-import { SearchView } from "./views/SearchView";
-import { CollectionsView } from "./views/CollectionsView";
-import { StatsView } from "./views/StatsView";
-import { DownloadPanel } from "./components/DownloadPanel";
-import { SettingsView } from "./views/SettingsView";
-import { MediaDetailView } from "./views/MediaDetailView";
+
+// Code-split secondary views & heavy modals
+const AnimeView = lazy(() => import("./views/AnimeView").then((m) => ({ default: m.AnimeView })));
+const MoviesView = lazy(() => import("./views/MoviesView").then((m) => ({ default: m.MoviesView })));
+const TvView = lazy(() => import("./views/TvView").then((m) => ({ default: m.TvView })));
+const LibraryView = lazy(() => import("./views/LibraryView").then((m) => ({ default: m.LibraryView })));
+const SearchView = lazy(() => import("./views/SearchView").then((m) => ({ default: m.SearchView })));
+const CollectionsView = lazy(() => import("./views/CollectionsView").then((m) => ({ default: m.CollectionsView })));
+const StatsView = lazy(() => import("./views/StatsView").then((m) => ({ default: m.StatsView })));
+const SettingsView = lazy(() => import("./views/SettingsView").then((m) => ({ default: m.SettingsView })));
+const MediaDetailView = lazy(() => import("./views/MediaDetailView").then((m) => ({ default: m.MediaDetailView })));
+const DownloadPanel = lazy(() => import("./components/DownloadPanel").then((m) => ({ default: m.DownloadPanel })));
+const TorrentPickerModal = lazy(() => import("./components/TorrentPickerModal").then((m) => ({ default: m.TorrentPickerModal })));
+const AniListModal = lazy(() => import("./components/AniListModal").then((m) => ({ default: m.AniListModal })));
+const OnboardingModal = lazy(() => import("./components/OnboardingModal").then((m) => ({ default: m.OnboardingModal })));
+
+import { useGamepadNav } from "./utils/useGamepadNav";
 
 import "./App.css";
+
+function ViewLoader() {
+  return (
+    <div className="view-container animate-pulse p-6">
+      <div className="h-10 w-48 bg-zinc-800/60 rounded-lg mb-6" />
+      <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-6 gap-4">
+        {Array.from({ length: 12 }).map((_, i) => (
+          <div key={i} className="aspect-[2/3] bg-zinc-800/40 rounded-xl" />
+        ))}
+      </div>
+    </div>
+  );
+}
 
 const queryClient = new QueryClient({
   defaultOptions: {
@@ -40,10 +65,22 @@ const queryClient = new QueryClient({
   },
 });
 
+const BROWSE_VIEWS: ViewMode[] = ["home", "anime", "movies", "tv", "library", "search", "collections", "stats", "downloads", "settings"];
+
 function MainApp() {
   const [currentView, setCurrentView] = useState<ViewMode>("home");
+  const [, setViewHistory] = useState<ViewMode[]>(["home"]);
   const [selectedMedia, setSelectedMedia] = useState<MediaItem | null>(null);
   const [mediaEpisodes, setMediaEpisodes] = useState<Episode[]>([]);
+  const [, setCatalogQuery] = useState("");
+  const [catalogType, setCatalogType] = useState<MediaType | null>(null);
+  const [catalogFiltered, setCatalogFiltered] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [libraryError, setLibraryError] = useState<string | null>(null);
+  const [collectionPicker, setCollectionPicker] = useState<{ mediaId: string } | null>(null);
+  const [activeCollectionId, setActiveCollectionId] = useState<string | null>(null);
+  const mediaLoadGenRef = useRef(0);
+  const streamGenRef = useRef(0);
 
   const [profile, setProfile] = useState<UserProfile>(() => StorageService.getProfile());
   const [settings, setSettings] = useState<AppSettings>(() => StorageService.getSettings());
@@ -56,7 +93,7 @@ function MainApp() {
   const [favorites, setFavorites] = useState<string[]>(() => StorageService.getFavorites());
   const [watchlist, setWatchlist] = useState<string[]>(() => StorageService.getWatchlist());
   const [collections, setCollections] = useState<Collection[]>(() => StorageService.getCollections());
-  const [localLibrary, setLocalLibrary] = useState<LocalMediaItem[]>([]);
+  const [localLibrary, setLocalLibrary] = useState<LocalMediaItem[]>(() => StorageService.getLibrary());
   const [isScanning, setIsScanning] = useState(false);
 
   const [searchResults, setSearchResults] = useState<MediaItem[]>([]);
@@ -161,25 +198,48 @@ function MainApp() {
     episode?: Episode;
     streamUrl: string;
     taskId?: string;
+    magnetUrl?: string;
+    torrentTitle?: string;
+    fileIndex?: number;
+    startAt?: number;
     error?: string;
+    statusLabel?: string;
   }>({ isOpen: false, media: null, streamUrl: "" });
 
-  const { data: trendingAnime = [] } = useQuery({
+  const {
+    data: trendingAnime = [],
+    isError: animeError,
+    error: animeErrorObj,
+    isLoading: animeLoading,
+  } = useQuery({
     queryKey: ["trendingAnime"],
     queryFn: () => AniListService.fetchTrending(1, 36),
     staleTime: 1000 * 60 * 15,
+    retry: 1,
   });
 
-  const { data: trendingMovies = [] } = useQuery({
+  const {
+    data: trendingMovies = [],
+    isError: moviesError,
+    error: moviesErrorObj,
+    isLoading: moviesLoading,
+  } = useQuery({
     queryKey: ["trendingMovies"],
     queryFn: () => TMDBService.fetchTrendingMovies(),
     staleTime: 1000 * 60 * 15,
+    retry: 1,
   });
 
-  const { data: trendingTv = [] } = useQuery({
+  const {
+    data: trendingTv = [],
+    isError: tvError,
+    error: tvErrorObj,
+    isLoading: tvLoading,
+  } = useQuery({
     queryKey: ["trendingTv"],
     queryFn: () => TMDBService.fetchTrendingTV(),
     staleTime: 1000 * 60 * 15,
+    retry: 1,
   });
 
   const needsDownloadPoll =
@@ -203,52 +263,123 @@ function MainApp() {
 
   const spotlightMedia = trendingAnime[0] || trendingMovies[0] || null;
 
-  const activeDownloads = downloadTasks.filter((t) => t.status === "Downloading" || t.status === "Streaming").length;
+  const activeDownloadTasks = downloadTasks.filter((t) => t.status === "Downloading" || t.status === "Streaming");
+  const activeDownloads = activeDownloadTasks.length;
   const overallProgress = activeDownloads > 0
-    ? Math.round(downloadTasks.reduce((acc, t) => acc + t.progress, 0) / downloadTasks.length)
+    ? Math.round(activeDownloadTasks.reduce((acc, t) => acc + t.progress, 0) / activeDownloads)
     : 0;
+
+  const navigateTo = useCallback((view: ViewMode) => {
+    setCurrentView((prev) => {
+      if (view !== prev && BROWSE_VIEWS.includes(prev)) {
+        setViewHistory((h) => [...h.slice(-20), prev]);
+      }
+      return view;
+    });
+    if (view !== "media-detail") {
+      setSelectedMedia(null);
+      setMediaEpisodes([]);
+    }
+    if (view !== "collections") setActiveCollectionId(null);
+  }, []);
+
+  const goBack = useCallback(() => {
+    setViewHistory((h) => {
+      const next = [...h];
+      const prev = next.pop() || "home";
+      setCurrentView(prev);
+      if (prev !== "media-detail") {
+        setSelectedMedia(null);
+        setMediaEpisodes([]);
+      }
+      return next.length ? next : ["home"];
+    });
+  }, []);
+
+  useEffect(() => {
+    void invokeTauri("configure_engine_cmd", {
+      max_concurrent: settings.maxConcurrentDownloads || 3,
+      speed_limit_mbps: settings.speedLimitMBps || 0,
+    }).catch(() => undefined);
+  }, [settings.maxConcurrentDownloads, settings.speedLimitMBps]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+      if ((e.ctrlKey || e.metaKey) && (e.key.toLowerCase() === "k" || e.key.toLowerCase() === "f")) {
         e.preventDefault();
         setIsCommandPaletteOpen((prev) => !prev);
       } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "j") {
         e.preventDefault();
-        setCurrentView("downloads");
+        navigateTo("downloads");
       } else if ((e.ctrlKey || e.metaKey) && e.key === ",") {
         e.preventDefault();
-        setCurrentView("settings");
+        navigateTo("settings");
       } else if (e.key === "Escape") {
+        if (videoPlayer.isOpen) {
+          return;
+        }
         if (isCommandPaletteOpen) {
           setIsCommandPaletteOpen(false);
         } else if (contextMenu.isOpen) {
           setContextMenu((prev) => ({ ...prev, isOpen: false }));
+        } else if (collectionPicker) {
+          setCollectionPicker(null);
         } else if (torrentModal.isOpen) {
           setTorrentModal((prev) => ({ ...prev, isOpen: false }));
         } else if (showAniListModal) {
           setShowAniListModal(false);
         } else if (currentView === "media-detail") {
-          setCurrentView("home");
+          goBack();
         }
       }
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [isCommandPaletteOpen, contextMenu.isOpen, torrentModal.isOpen, showAniListModal, currentView]);
+  }, [isCommandPaletteOpen, contextMenu.isOpen, torrentModal.isOpen, showAniListModal, currentView, videoPlayer.isOpen, collectionPicker, navigateTo, goBack]);
 
-  const handleSelectMedia = useCallback(async (media: MediaItem) => {
-    StorageService.cacheMedia(media);
-    setSelectedMedia(media);
-    setCurrentView("media-detail");
-    if (media.mediaType === "anime" && media.anilistId) {
-      const detail = await AniListService.getAnimeDetail(media.anilistId);
-      setMediaEpisodes(detail.episodes);
-    } else if (media.tmdbId) {
-      const detail = await TMDBService.getMediaDetail(media.tmdbId, media.mediaType);
-      setMediaEpisodes(detail.episodes);
-    } else {
-      setMediaEpisodes([
+  const browseViews: ViewMode[] = useMemo(
+    () => ["home", "anime", "movies", "tv", "library", "search", "collections", "stats"],
+    []
+  );
+
+  useGamepadNav({
+    enabled: true,
+    onBack: () => {
+      if (isCommandPaletteOpen) setIsCommandPaletteOpen(false);
+      else if (contextMenu.isOpen) setContextMenu((prev) => ({ ...prev, isOpen: false }));
+      else if (collectionPicker) setCollectionPicker(null);
+      else if (torrentModal.isOpen) setTorrentModal((prev) => ({ ...prev, isOpen: false }));
+      else if (showAniListModal) setShowAniListModal(false);
+      else if (currentView === "media-detail") goBack();
+    },
+    onOpenSearch: () => setIsCommandPaletteOpen(true),
+    onPrevTab: () => {
+      const idx = browseViews.indexOf(currentView);
+      if (idx > 0) navigateTo(browseViews[idx - 1]);
+    },
+    onNextTab: () => {
+      const idx = browseViews.indexOf(currentView);
+      if (idx >= 0 && idx < browseViews.length - 1) navigateTo(browseViews[idx + 1]);
+    },
+  });
+
+  const loadEpisodesForMedia = useCallback(async (media: MediaItem, gen: number) => {
+    try {
+      if (media.mediaType === "anime" && media.anilistId) {
+        const detail = await AniListService.getAnimeDetail(media.anilistId);
+        if (mediaLoadGenRef.current !== gen) return [];
+        setSelectedMedia((prev) => (prev?.id === media.id ? { ...prev, ...detail.media } : prev));
+        setMediaEpisodes(detail.episodes);
+        return detail.episodes;
+      }
+      if (media.tmdbId) {
+        const detail = await TMDBService.getMediaDetail(media.tmdbId, media.mediaType);
+        if (mediaLoadGenRef.current !== gen) return [];
+        setSelectedMedia((prev) => (prev?.id === media.id ? { ...prev, ...detail.media } : prev));
+        setMediaEpisodes(detail.episodes);
+        return detail.episodes;
+      }
+      const fallback: Episode[] = [
         {
           id: `ep_default_${media.id}`,
           episodeNumber: 1,
@@ -258,25 +389,184 @@ function MainApp() {
           thumbnail: media.coverImage,
           durationMinutes: 24,
         },
-      ]);
+      ];
+      if (mediaLoadGenRef.current === gen) setMediaEpisodes(fallback);
+      return fallback;
+    } catch (err) {
+      if (mediaLoadGenRef.current !== gen) return [];
+      setCatalogError(err instanceof Error ? err.message : String(err));
+      return [];
     }
   }, []);
 
+  const handleSelectMedia = useCallback(async (media: MediaItem) => {
+    StorageService.cacheMedia(media);
+    const gen = ++mediaLoadGenRef.current;
+    setSelectedMedia(media);
+    setMediaEpisodes([]);
+    setCatalogError(null);
+    setCurrentView((prev) => {
+      if (prev !== "media-detail" && BROWSE_VIEWS.includes(prev)) {
+        setViewHistory((h) => [...h.slice(-20), prev]);
+      }
+      return "media-detail";
+    });
+    await loadEpisodesForMedia(media, gen);
+  }, [loadEpisodesForMedia]);
+
+  const isStartingStreamRef = useRef(false);
+
+  const startStreamWithFile = useCallback(async (
+    torrent: TorrentResult,
+    fileIdx?: number,
+    overrides?: { media?: MediaItem; ep?: Episode; title?: string; startAt?: number; fromMemory?: boolean }
+  ) => {
+    const media = overrides?.media || torrentModal.media;
+    const ep = overrides?.ep !== undefined ? overrides.ep : torrentModal.ep;
+    const startAt = overrides?.startAt ?? 0;
+    const gen = streamGenRef.current;
+    if (!media) return false;
+    if (!isValidMagnet(torrent.magnet_url)) {
+      setVideoPlayer({
+        isOpen: true,
+        media,
+        episode: ep,
+        streamUrl: "",
+        error: "That release has no valid magnet link.",
+      });
+      return false;
+    }
+
+    const title =
+      overrides?.title ||
+      (ep ? `${media.title} Ep ${ep.episodeNumber}` : torrentModal.title || torrent.title);
+
+    setTorrentModal((prev) => ({ ...prev, isOpen: false }));
+    setVideoPlayer({
+      isOpen: true,
+      media,
+      episode: ep,
+      streamUrl: "",
+      magnetUrl: torrent.magnet_url,
+      torrentTitle: torrent.title,
+      fileIndex: fileIdx,
+      startAt,
+      statusLabel: overrides?.fromMemory
+        ? (startAt > 5
+          ? `Reusing last torrent… will resume at ${Math.floor(startAt / 60)}m`
+          : "Reusing the last working torrent…")
+        : (startAt > 5
+          ? `Connecting to swarm… will resume at ${Math.floor(startAt / 60)}m`
+          : "Connecting to swarm and waiting until the file can stream…"),
+    });
+
+    try {
+      const streamInfo = await invokeTauri<StreamInfo>("start_torrent_stream_cmd", {
+        title,
+        media_type: media.mediaType,
+        magnet_link: torrent.magnet_url,
+        file_index: fileIdx,
+        save_path: settings.downloadPath,
+        season: ep?.seasonNumber,
+        episode: ep?.episodeNumber,
+      });
+      if (streamGenRef.current !== gen) return false;
+
+      if (streamInfo.needs_file_pick) {
+        setVideoPlayer((prev) => ({ ...prev, isOpen: false }));
+        setTorrentModal({
+          isOpen: true,
+          type: "stream",
+          title,
+          media,
+          ep,
+          selectedTorrent: torrent,
+          multiFiles: streamInfo.files,
+        });
+        return true;
+      }
+
+      rememberSuccessfulStream(media, ep, torrent.magnet_url, torrent.title, streamInfo);
+      setVideoPlayer({
+        isOpen: true,
+        media,
+        episode: ep,
+        streamUrl: streamInfo.stream_url,
+        taskId: streamInfo.task_id,
+        magnetUrl: torrent.magnet_url,
+        torrentTitle: torrent.title,
+        fileIndex: streamInfo.selected_file_index,
+        startAt,
+        statusLabel: "Launching player…",
+      });
+      return true;
+    } catch (e) {
+      if (streamGenRef.current !== gen) return false;
+      if (overrides?.fromMemory) {
+        StorageService.forgetTorrentMemory(media.id, torrent.magnet_url);
+      }
+      setVideoPlayer({
+        isOpen: true,
+        media,
+        episode: ep,
+        streamUrl: "",
+        error: `Could not start torrent stream: ${e}`,
+      });
+      return false;
+    }
+  }, [settings.downloadPath, torrentModal.ep, torrentModal.media, torrentModal.title]);
+
   const handleOpenTorrentModal = async (type: "stream" | "download", ep?: Episode, targetMedia?: MediaItem) => {
-    isStartingStreamRef.current = false;
     const media = targetMedia || selectedMedia;
     if (!media) return;
+    if (isStartingStreamRef.current) return;
+    isStartingStreamRef.current = true;
+    const gen = ++streamGenRef.current;
     StorageService.cacheMedia(media);
-    const titleQuery = ep ? `${media.title} - ${ep.episodeNumber}` : media.title;
+    const playEpisode = type === "stream" ? resolvePlayEpisode(media, ep, watchProgress) : ep;
+    const resumePoint = playEpisode
+      ? watchProgress.find(
+          (p) => p.mediaId === media.id && p.episodeNumber === playEpisode.episodeNumber && p.percentage < 90
+        )
+      : undefined;
+    const startAt = resumePoint && resumePoint.currentTime > 5 ? resumePoint.currentTime : 0;
     const useEasyWatch = type === "stream" && (settings.easyWatch ?? true);
+    const remembered = type === "stream" ? findRememberedTorrent(media, playEpisode) : null;
 
-    // Easy Watch: keep picker closed and show player loading while we search + pick
+    if (remembered) {
+      setVideoPlayer({
+        isOpen: true,
+        media,
+        episode: playEpisode,
+        streamUrl: "",
+        startAt,
+        magnetUrl: remembered.magnetUrl,
+        torrentTitle: remembered.torrentTitle,
+        statusLabel: "Reusing the last working torrent…",
+      });
+      const reused = await startStreamWithFile(
+        rememberedToTorrent(remembered),
+        remembered.isPack ? undefined : remembered.fileIndex,
+        {
+          media,
+          ep: playEpisode,
+          title: playEpisode ? `${media.title} Ep ${playEpisode.episodeNumber}` : media.title,
+          startAt,
+          fromMemory: true,
+        }
+      );
+      if (reused) {
+        isStartingStreamRef.current = false;
+        return;
+      }
+    }
+
     setTorrentModal({
       isOpen: !useEasyWatch,
       type,
-      title: titleQuery,
+      title: media.title,
       media,
-      ep,
+      ep: playEpisode,
       multiFiles: undefined,
     });
 
@@ -284,221 +574,80 @@ function MainApp() {
       setVideoPlayer({
         isOpen: true,
         media,
-        episode: ep,
+        episode: playEpisode,
         streamUrl: "",
+        startAt,
+        statusLabel: startAt > 5
+          ? `Searching indexers… will resume at ${Math.floor(startAt / 60)}m`
+          : "Searching Nyaa, SeaDex, Torrentio, and other indexers…",
       });
     }
 
     setIsFetchingTorrents(true);
     try {
-      const results = await invokeTauri<TorrentResult[]>("search_torrents_cmd", {
-        query: titleQuery,
-        media_type: media.mediaType,
-        anilist_id: media.anilistId || undefined,
-      });
-      setTorrentResults(results);
+      const results = await invokeTauri<TorrentResult[]>(
+        "search_torrents_cmd",
+        buildSearchInvokeArgs(media, playEpisode, settings)
+      );
+      if (streamGenRef.current !== gen) return;
+      const usable = results.filter((t) => isValidMagnet(t.magnet_url));
+      setTorrentResults(usable);
 
       if (useEasyWatch) {
         const best = selectBestTorrent(
-          results,
+          usable,
           settings.preferredQuality || "1080p",
-          settings.minSeeders ?? 1
+          settings.minSeeders ?? 1,
+          playEpisode?.episodeNumber
         );
         if (best) {
-          // Seed modal context so stream handlers see media/ep
           setTorrentModal((prev) => ({
             ...prev,
             isOpen: false,
-            type,
-            title: titleQuery,
-            media,
-            ep,
             selectedTorrent: best,
+            media,
+            ep: playEpisode,
           }));
-          await handleSelectStreamTorrentEasy(best, media, ep, titleQuery);
+          await startStreamWithFile(best, resumePoint?.fileIndex, {
+            media,
+            ep: playEpisode,
+            title: playEpisode ? `${media.title} Ep ${playEpisode.episodeNumber}` : media.title,
+            startAt,
+          });
           return;
         }
-        // No viable torrent — fall back to manual picker
         setVideoPlayer((prev) => ({ ...prev, isOpen: false }));
         setTorrentModal({
           isOpen: true,
           type,
-          title: titleQuery,
+          title: media.title,
           media,
-          ep,
+          ep: playEpisode,
           multiFiles: undefined,
         });
       }
     } catch (err) {
-      console.warn("Torrent indexer search failed gracefully:", err);
+      if (streamGenRef.current !== gen) return;
       setTorrentResults([]);
       if (useEasyWatch) {
         setVideoPlayer({
           isOpen: true,
           media,
-          episode: ep,
+          episode: playEpisode,
           streamUrl: "",
           error: `Could not find streams: ${err}`,
         });
       }
     } finally {
-      setIsFetchingTorrents(false);
-    }
-  };
-
-  /** Easy Watch path: stream without depending on torrentModal race. */
-  const handleSelectStreamTorrentEasy = async (
-    torrent: TorrentResult,
-    media: MediaItem,
-    ep: Episode | undefined,
-    titleQuery: string
-  ) => {
-    if (isStartingStreamRef.current) return;
-    isStartingStreamRef.current = true;
-    try {
-      const addResult = await invokeTauri<TorrentAddResult>("add_magnet_cmd", {
-        magnet_link: torrent.magnet_url,
-        title: torrent.title,
-        media_type: media.mediaType,
-        save_path: settings.downloadPath,
-      });
-
-      const videoFiles = addResult.files.filter((f: TorrentFileItem) => f.is_video);
-      if (videoFiles.length > 1) {
-        // Need user to pick a file inside multi-file torrent
-        setVideoPlayer((prev) => ({ ...prev, isOpen: false }));
-        setTorrentModal({
-          isOpen: true,
-          type: "stream",
-          title: titleQuery,
-          media,
-          ep,
-          selectedTorrent: torrent,
-          multiFiles: addResult.files,
-        });
-        return;
-      }
-
-      const title = ep ? `${media.title} Ep ${ep.episodeNumber}` : titleQuery;
-      setVideoPlayer({
-        isOpen: true,
-        media,
-        episode: ep,
-        streamUrl: "",
-      });
-
-      const streamInfo = await invokeTauri<StreamInfo>("start_torrent_stream_cmd", {
-        title,
-        media_type: media.mediaType,
-        magnet_link: torrent.magnet_url,
-        file_index: addResult.recommended_file_index,
-        save_path: settings.downloadPath,
-      });
-
-      setVideoPlayer({
-        isOpen: true,
-        media,
-        episode: ep,
-        streamUrl: streamInfo.stream_url,
-        taskId: streamInfo.task_id,
-      });
-    } catch (e) {
-      console.warn("Easy Watch stream failed:", e);
-      setVideoPlayer({
-        isOpen: true,
-        media,
-        episode: ep,
-        streamUrl: "",
-        error: `Could not start torrent stream: ${e}`,
-      });
-    } finally {
+      if (streamGenRef.current === gen) setIsFetchingTorrents(false);
       isStartingStreamRef.current = false;
     }
   };
-
-  const startStreamWithFile = async (
-    torrent: TorrentResult,
-    fileIdx?: number,
-    overrides?: { media?: MediaItem; ep?: Episode; title?: string }
-  ) => {
-    const media = overrides?.media || torrentModal.media;
-    const ep = overrides?.ep !== undefined ? overrides.ep : torrentModal.ep;
-    if (!media) return;
-
-    const title =
-      overrides?.title ||
-      (ep ? `${media.title} Ep ${ep.episodeNumber}` : torrentModal.title || torrent.title);
-
-    setTorrentModal((prev) => ({ ...prev, isOpen: false }));
-
-    setVideoPlayer({
-      isOpen: true,
-      media,
-      episode: ep,
-      streamUrl: "",
-    });
-
-    try {
-      const streamInfo = await invokeTauri<StreamInfo>("start_torrent_stream_cmd", {
-        title,
-        media_type: media.mediaType,
-        magnet_link: torrent.magnet_url,
-        file_index: fileIdx !== undefined ? fileIdx : undefined,
-        save_path: settings.downloadPath,
-      });
-
-      setVideoPlayer({
-        isOpen: true,
-        media,
-        episode: ep,
-        streamUrl: streamInfo.stream_url,
-        taskId: streamInfo.task_id,
-      });
-    } catch (e) {
-      console.warn("Torrent stream start failed:", e);
-      setVideoPlayer({
-        isOpen: true,
-        media,
-        episode: ep,
-        streamUrl: "",
-        error: `Could not start torrent stream: ${e}`,
-      });
-    }
-  };
-
-  const isStartingStreamRef = useRef(false);
 
   const handleSelectStreamTorrent = async (torrent: TorrentResult) => {
     if (isStartingStreamRef.current) return;
     isStartingStreamRef.current = true;
-    const media = torrentModal.media;
-    if (!media) {
-      isStartingStreamRef.current = false;
-      return;
-    }
-
     try {
-      const addResult = await invokeTauri<TorrentAddResult>("add_magnet_cmd", {
-        magnet_link: torrent.magnet_url,
-        title: torrent.title,
-        media_type: media.mediaType,
-        save_path: settings.downloadPath,
-      });
-
-      const videoFiles = addResult.files.filter((f: TorrentFileItem) => f.is_video);
-      if (videoFiles.length > 1) {
-        setTorrentModal((prev) => ({
-          ...prev,
-          selectedTorrent: torrent,
-          multiFiles: addResult.files,
-        }));
-        isStartingStreamRef.current = false;
-        return;
-      }
-
-      await startStreamWithFile(torrent, addResult.recommended_file_index);
-    } catch (e) {
-      // Fall back to direct stream attempt
       await startStreamWithFile(torrent);
     } finally {
       isStartingStreamRef.current = false;
@@ -516,7 +665,7 @@ function MainApp() {
       seeders: torrent.seeders,
       peers: torrent.leechers,
     });
-    setCurrentView("downloads");
+    navigateTo("downloads");
   };
 
   const handlePlayMediaDirectly = (media: MediaItem) => {
@@ -525,40 +674,77 @@ function MainApp() {
   };
 
   const handleToggleFavorite = (id: string) => {
+    const cached = StorageService.getMediaCache()[id];
+    if (cached) StorageService.cacheMedia(cached);
     StorageService.toggleFavorite(id);
     setFavorites(StorageService.getFavorites());
   };
 
   const handleToggleWatchlist = (id: string) => {
+    const cached = StorageService.getMediaCache()[id];
+    if (cached) StorageService.cacheMedia(cached);
     StorageService.toggleWatchlist(id);
     setWatchlist(StorageService.getWatchlist());
   };
 
   const handleMarkWatched = async (media: MediaItem, ep?: Episode, markAsWatched = true) => {
-    const epNum = ep ? ep.episodeNumber : 1;
-    const progressObj: StreamProgress = {
-      mediaId: media.id,
-      mediaTitle: media.title,
-      mediaType: media.mediaType,
-      coverImage: media.coverImage,
-      episodeNumber: epNum,
-      currentTime: markAsWatched ? 1440 : 0,
-      duration: 1440,
-      percentage: markAsWatched ? 100 : 0,
-      lastUpdated: Date.now(),
-      anilistId: media.anilistId,
-    };
+    if (ep) {
+      if (markAsWatched) {
+        const progressObj: StreamProgress = {
+          mediaId: media.id,
+          mediaTitle: media.title,
+          mediaType: media.mediaType,
+          coverImage: media.coverImage,
+          episodeNumber: ep.episodeNumber,
+          currentTime: 1440,
+          duration: 1440,
+          percentage: 100,
+          completed: true,
+          lastUpdated: Date.now(),
+          anilistId: media.anilistId,
+        };
+        StorageService.saveWatchProgress(progressObj);
+      } else {
+        StorageService.removeWatchProgress(media.id, ep.episodeNumber);
+      }
+      setWatchProgress(StorageService.getWatchProgress());
 
-    StorageService.saveWatchProgress(progressObj);
-    setWatchProgress(StorageService.getWatchProgress());
+      if (media.anilistId && profile.anilistToken && markAsWatched) {
+        const isFinished = media.episodesCount ? ep.episodeNumber >= media.episodesCount : false;
+        await AniListService.updateAniListProgress({
+          anilistId: media.anilistId,
+          episodeNumber: ep.episodeNumber,
+          status: isFinished ? "COMPLETED" : "CURRENT",
+        });
+      }
+    } else {
+      if (markAsWatched) {
+        const epCount =
+          media.episodesCount ||
+          (selectedMedia?.id === media.id && mediaEpisodes.length > 0 ? mediaEpisodes.length : 0) ||
+          (media.mediaType === "movie" ? 1 : 12);
+        StorageService.markSeriesWatched(media, epCount);
+        setWatchProgress(StorageService.getWatchProgress());
 
-    if (media.anilistId && profile.anilistToken && markAsWatched) {
-      const isFinished = media.episodesCount ? epNum >= media.episodesCount : false;
-      await AniListService.updateAniListProgress({
-        anilistId: media.anilistId,
-        episodeNumber: epNum,
-        status: isFinished ? "COMPLETED" : "CURRENT",
-      });
+        if (media.anilistId && profile.anilistToken) {
+          await AniListService.updateAniListProgress({
+            anilistId: media.anilistId,
+            episodeNumber: epCount,
+            status: "COMPLETED",
+          });
+        }
+      } else {
+        StorageService.removeSeriesProgress(media.id);
+        setWatchProgress(StorageService.getWatchProgress());
+
+        if (media.anilistId && profile.anilistToken) {
+          await AniListService.updateAniListProgress({
+            anilistId: media.anilistId,
+            episodeNumber: 0,
+            status: "PLANNING",
+          });
+        }
+      }
     }
   };
 
@@ -600,43 +786,125 @@ function MainApp() {
     StorageService.getContinueDismissed()
   );
 
-  const handleRemoveFromContinue = (media: MediaItem) => {
+  const handleRemoveFromContinue = (media: MediaItem, progress?: StreamProgress) => {
     StorageService.dismissFromContinue(media.id);
+    if (progress) {
+      StorageService.removeWatchProgress(progress.mediaId, progress.episodeNumber);
+    }
     setContinueDismissed(StorageService.getContinueDismissed());
     setWatchProgress(StorageService.getWatchProgress());
   };
 
-  const handleScanFolder = async (mediaType: MediaType) => {
+  const handleScanFolder = async (mediaType: MediaType, customPath?: string) => {
     setIsScanning(true);
+    setLibraryError(null);
     const pathMap = {
       anime: settings.animeFolder,
       movie: settings.moviesFolder,
       tv: settings.tvFolder,
     };
+    const targetPath = customPath || pathMap[mediaType];
     try {
-      const items = await invokeTauri<LocalMediaItem[]>("scan_library", {
-        path: pathMap[mediaType],
+      const result = await invokeTauri<ScanLibraryResult>("scan_library", {
+        path: targetPath,
         media_type: mediaType,
       });
-      setLocalLibrary((prev) => [...prev.filter((i) => i.media_type !== mediaType), ...items]);
+      const items = Array.isArray(result) ? result : result.items || [];
+      const error = Array.isArray(result) ? null : result.error;
+      setLocalLibrary((prev) => {
+        const next = [...prev.filter((i) => i.media_type !== mediaType), ...items];
+        StorageService.saveLibrary(next);
+        return next;
+      });
+      if (error) setLibraryError(error);
+    } catch (err) {
+      setLibraryError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsScanning(false);
     }
   };
 
-  const handleGlobalSearch = async (query: string, type: MediaType = "anime", genre?: string, year?: number) => {
+  const handleGlobalSearch = async (
+    query: string,
+    type: MediaType = "anime",
+    genre?: string,
+    year?: number,
+    sort?: string
+  ) => {
     setIsSearching(true);
+    setCatalogQuery(query);
+    setCatalogType(type);
+    const hasActiveFilters = Boolean(
+      query.trim() ||
+      (genre && genre !== "All") ||
+      year ||
+      (sort && sort !== "trending" && sort !== "TRENDING_DESC")
+    );
+    setCatalogFiltered(hasActiveFilters);
+    setCatalogError(null);
     try {
       if (type === "anime") {
-        const results = await AniListService.searchAnime({ query, genre, year });
-        setSearchResults(results);
+        if (query.trim()) {
+          const results = await AniListService.searchAnime({
+            query: query.trim(),
+            genre: genre && genre !== "All" ? genre : undefined,
+            year,
+            sort: sort ? [sort] : ["POPULARITY_DESC"],
+          });
+          setSearchResults(results);
+        } else if (sort || (genre && genre !== "All")) {
+          const results = await AniListService.fetchAnimeBySort(
+            (sort as any) || "TRENDING_DESC",
+            genre
+          );
+          setSearchResults(results);
+        } else {
+          setSearchResults(trendingAnime);
+        }
+      } else if (type === "movie") {
+        if (query.trim()) {
+          const results = await TMDBService.searchTMDB(query.trim(), "movie", {
+            genre: genre && genre !== "All" ? genre : undefined,
+            year,
+          });
+          setSearchResults(results);
+        } else if (sort || (genre && genre !== "All")) {
+          const results = await TMDBService.fetchMoviesBySort(
+            (sort as any) || "trending",
+            genre
+          );
+          setSearchResults(results);
+        } else {
+          setSearchResults(trendingMovies);
+        }
       } else {
-        const results = await TMDBService.searchTMDB(query, type);
-        setSearchResults(results);
+        if (query.trim()) {
+          const results = await TMDBService.searchTMDB(query.trim(), "tv", {
+            genre: genre && genre !== "All" ? genre : undefined,
+            year,
+          });
+          setSearchResults(results);
+        } else if (sort || (genre && genre !== "All")) {
+          const results = await TMDBService.fetchTVBySort(
+            (sort as any) || "trending",
+            genre
+          );
+          setSearchResults(results);
+        } else {
+          setSearchResults(trendingTv);
+        }
       }
+    } catch (err) {
+      setSearchResults([]);
+      setCatalogError(err instanceof Error ? err.message : String(err));
     } finally {
       setIsSearching(false);
     }
+  };
+
+  const persistCollections = (updated: Collection[]) => {
+    setCollections(updated);
+    StorageService.saveCollections(updated);
   };
 
   const handlePauseDownload = async (id: string) => {
@@ -677,17 +945,14 @@ function MainApp() {
       <TitleBar
         profile={profile}
         onOpenSearch={() => setIsCommandPaletteOpen(true)}
-        onNavigate={setCurrentView}
+        onNavigate={navigateTo}
         currentViewTitle={currentView === "media-detail" && selectedMedia ? selectedMedia.title : currentView}
       />
 
       <div className="app-main-layout">
         <Sidebar
           currentView={currentView}
-          onNavigate={(view) => {
-            if (view !== "media-detail") setSelectedMedia(null);
-            setCurrentView(view);
-          }}
+          onNavigate={navigateTo}
           activeDownloads={activeDownloads}
           overallProgress={overallProgress}
           onOpenAniListModal={() => setShowAniListModal(true)}
@@ -705,11 +970,9 @@ function MainApp() {
               onSelectMedia={handleSelectMedia}
               onPlayMedia={handlePlayMediaDirectly}
               onResumeStream={async (progress) => {
-                // Resolve media from pool → cache → progress payload (never fall back to spotlight)
                 const cached = StorageService.getMediaCache()[progress.mediaId];
-                const match: MediaItem =
+                const match: MediaItem = cached ||
                   allMediaPool.find((m) => m.id === progress.mediaId) ||
-                  cached ||
                   {
                     id: progress.mediaId,
                     title: progress.mediaTitle,
@@ -729,28 +992,20 @@ function MainApp() {
                   title: `Episode ${progress.episodeNumber}`,
                 };
 
-                if (progress.magnetUrl) {
+                const remembered = findRememberedTorrent(match, ep);
+                const resumeTorrent = toResumeTorrent(progress, match)
+                  || (remembered ? rememberedToTorrent(remembered) : null);
+                if (resumeTorrent) {
                   await startStreamWithFile(
+                    resumeTorrent,
+                    remembered?.isPack ? undefined : progress.fileIndex,
                     {
-                      id: `res_${progress.mediaId}_${progress.episodeNumber}`,
-                      title: progress.torrentTitle || match.title,
-                      magnet_url: progress.magnetUrl,
-                      size_bytes: 0,
-                      size_formatted: "",
-                      seeders: 0,
-                      leechers: 0,
-                      quality: "",
-                      source_name: "Resume",
-                      date_posted: "",
-                      media_type: progress.mediaType,
-                    },
-                    progress.fileIndex,
-                    {
-                      media: match,
-                      ep,
-                      title: progress.torrentTitle || `${match.title} Ep ${progress.episodeNumber}`,
-                    }
-                  );
+                    media: match,
+                    ep,
+                    title: progress.torrentTitle || remembered?.torrentTitle || `${match.title} Ep ${progress.episodeNumber}`,
+                    startAt: progress.percentage < 90 ? progress.currentTime : 0,
+                    fromMemory: true,
+                  });
                 } else {
                   await handleOpenTorrentModal("stream", ep, match);
                 }
@@ -759,182 +1014,245 @@ function MainApp() {
               onToggleFavorite={handleToggleFavorite}
               watchlist={watchlist}
               onToggleWatchlist={handleToggleWatchlist}
-              onNavigateTab={(tab) => setCurrentView(tab)}
+              onNavigateTab={(tab) => navigateTo(tab)}
               onContextMenu={handleOpenContextMenu}
               continueDismissed={continueDismissed}
             />
           )}
 
-          {currentView === "anime" && (
-            <AnimeView
-              items={trendingAnime}
-              isLoading={false}
-              onSelectMedia={handleSelectMedia}
-              onPlayMedia={handlePlayMediaDirectly}
-              favorites={favorites}
-              onToggleFavorite={handleToggleFavorite}
-              onSearch={(q, g) => handleGlobalSearch(q, "anime", g)}
-              onContextMenu={handleOpenContextMenu}
-            />
-          )}
+          <Suspense fallback={<ViewLoader />}>
+            {currentView === "anime" && (
+              <AnimeView
+                items={catalogFiltered && catalogType === "anime" ? searchResults : trendingAnime}
+                isLoading={catalogFiltered && catalogType === "anime" ? isSearching : animeLoading}
+                error={catalogFiltered && catalogType === "anime" ? catalogError : animeError ? String(animeErrorObj) : null}
+                onSelectMedia={handleSelectMedia}
+                onPlayMedia={handlePlayMediaDirectly}
+                favorites={favorites}
+                onToggleFavorite={handleToggleFavorite}
+                onToggleWatchlist={handleToggleWatchlist}
+                onSearch={(q, g, s) => handleGlobalSearch(q, "anime", g, undefined, s)}
+                onContextMenu={handleOpenContextMenu}
+              />
+            )}
 
-          {currentView === "movies" && (
-            <MoviesView
-              items={trendingMovies}
-              isLoading={false}
-              onSelectMedia={handleSelectMedia}
-              onPlayMedia={handlePlayMediaDirectly}
-              favorites={favorites}
-              onToggleFavorite={handleToggleFavorite}
-              onSearch={(q) => handleGlobalSearch(q, "movie")}
-              onContextMenu={handleOpenContextMenu}
-            />
-          )}
+            {currentView === "movies" && (
+              <MoviesView
+                items={catalogFiltered && catalogType === "movie" ? searchResults : trendingMovies}
+                isLoading={catalogFiltered && catalogType === "movie" ? isSearching : moviesLoading}
+                error={catalogFiltered && catalogType === "movie" ? catalogError : moviesError ? String(moviesErrorObj) : null}
+                onSelectMedia={handleSelectMedia}
+                onPlayMedia={handlePlayMediaDirectly}
+                favorites={favorites}
+                onToggleFavorite={handleToggleFavorite}
+                onToggleWatchlist={handleToggleWatchlist}
+                onSearch={(q, g, s) => handleGlobalSearch(q, "movie", g, undefined, s)}
+                onContextMenu={handleOpenContextMenu}
+              />
+            )}
 
-          {currentView === "tv" && (
-            <TvView
-              items={trendingTv}
-              isLoading={false}
-              onSelectMedia={handleSelectMedia}
-              onPlayMedia={handlePlayMediaDirectly}
-              favorites={favorites}
-              onToggleFavorite={handleToggleFavorite}
-              onSearch={(q) => handleGlobalSearch(q, "tv")}
-              onContextMenu={handleOpenContextMenu}
-            />
-          )}
+            {currentView === "tv" && (
+              <TvView
+                items={catalogFiltered && catalogType === "tv" ? searchResults : trendingTv}
+                isLoading={catalogFiltered && catalogType === "tv" ? isSearching : tvLoading}
+                error={catalogFiltered && catalogType === "tv" ? catalogError : tvError ? String(tvErrorObj) : null}
+                onSelectMedia={handleSelectMedia}
+                onPlayMedia={handlePlayMediaDirectly}
+                favorites={favorites}
+                onToggleFavorite={handleToggleFavorite}
+                onToggleWatchlist={handleToggleWatchlist}
+                onSearch={(q, g, s) => handleGlobalSearch(q, "tv", g, undefined, s)}
+                onContextMenu={handleOpenContextMenu}
+              />
+            )}
 
-          {currentView === "library" && (
-            <LibraryView
-              localItems={localLibrary}
-              isScanning={isScanning}
-              onScanFolder={handleScanFolder}
-              onPlayLocalItem={async (item) => {
-                // Local file playback: use Tauri's asset protocol so the built-in player
-                // can load raw filesystem paths (WebView2 can't open file:// URLs).
-                const src = isTauri()
-                  ? (await import("@tauri-apps/api/core")).convertFileSrc(item.path)
-                  : "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4";
-                setVideoPlayer({
-                  isOpen: true,
-                  media: {
-                    id: item.id,
-                    title: item.parsed_title,
-                    mediaType: item.media_type,
-                    coverImage: "",
-                    synopsis: item.filename,
-                    genres: ["Local Library"],
-                  },
-                  episode: {
-                    id: item.id,
-                    episodeNumber: item.episode || 1,
-                    seasonNumber: item.season || 1,
-                    title: item.parsed_title,
-                  },
-                  streamUrl: src,
-                });
-              }}
-            />
-          )}
-
-          {currentView === "search" && (
-            <SearchView
-              searchResults={searchResults}
-              trendingAnime={trendingAnime}
-              trendingMovies={trendingMovies}
-              trendingTv={trendingTv}
-              isLoading={isSearching}
-              onSearch={handleGlobalSearch}
-              onSelectMedia={handleSelectMedia}
-              onPlayMedia={handlePlayMediaDirectly}
-              favorites={favorites}
-              onToggleFavorite={handleToggleFavorite}
-              onContextMenu={handleOpenContextMenu}
-            />
-          )}
-
-          {currentView === "collections" && (
-            <CollectionsView
-              collections={collections}
-              watchlistMedia={watchlistMediaList}
-              favoriteMedia={favoriteMediaList}
-              onSelectMedia={handleSelectMedia}
-              onPlayMedia={handlePlayMediaDirectly}
-              favorites={favorites}
-              onToggleFavorite={handleToggleFavorite}
-              onAddNewCollection={(name, description) => {
-                const newCol: Collection = {
-                  id: `col_${Date.now()}`,
-                  name,
-                  description,
-                  mediaIds: [],
-                  createdAt: Date.now(),
-                };
-                const updated = [...collections, newCol];
-                setCollections(updated);
-                StorageService.saveCollections(updated);
-              }}
-            />
-          )}
-
-          {currentView === "stats" && <StatsView watchHistory={watchProgress} />}
-
-          {currentView === "downloads" && (
-            <div className="view-container">
-              <DownloadPanel
-                tasks={downloadTasks}
-                onPause={handlePauseDownload}
-                onResume={handleResumeDownload}
-                onCancel={handleCancelDownload}
-                onPlayStream={(task) => {
+            {currentView === "library" && (
+              <LibraryView
+                localItems={localLibrary}
+                isScanning={isScanning}
+                scanError={libraryError}
+                onScanFolder={handleScanFolder}
+                onPlayLocalItem={async (item) => {
                   setVideoPlayer({
                     isOpen: true,
                     media: {
-                      id: task.id,
-                      title: task.title,
-                      mediaType: task.media_type,
+                      id: item.id,
+                      title: item.parsed_title,
+                      mediaType: item.media_type,
                       coverImage: "",
-                      synopsis: task.title,
-                      genres: ["Torrent Stream"],
+                      synopsis: item.filename,
+                      genres: ["Local Library"],
                     },
-                    streamUrl: task.stream_url || "https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4",
+                    episode: {
+                      id: item.id,
+                      episodeNumber: item.episode || 1,
+                      seasonNumber: item.season || 1,
+                      title: item.parsed_title,
+                    },
+                    streamUrl: item.path,
+                    statusLabel: "Opening local file…",
                   });
                 }}
               />
-            </div>
-          )}
+            )}
 
-          {currentView === "settings" && (
-            <SettingsView
-              settings={settings}
-              onSaveSettings={(updated) => {
-                setSettings(updated);
-                StorageService.saveSettings(updated);
-              }}
-              profile={profile}
-              onSaveProfile={(updatedProfile) => {
-                setProfile(updatedProfile);
-                StorageService.saveProfile(updatedProfile);
-              }}
-              onOpenAniListModal={() => setShowAniListModal(true)}
-            />
-          )}
+            {currentView === "search" && (
+              <SearchView
+                searchResults={searchResults}
+                trendingAnime={trendingAnime}
+                trendingMovies={trendingMovies}
+                trendingTv={trendingTv}
+                isLoading={isSearching}
+                error={catalogError}
+                onSearch={handleGlobalSearch}
+                onSelectMedia={handleSelectMedia}
+                onPlayMedia={handlePlayMediaDirectly}
+                favorites={favorites}
+                onToggleFavorite={handleToggleFavorite}
+                onToggleWatchlist={handleToggleWatchlist}
+                onContextMenu={handleOpenContextMenu}
+              />
+            )}
 
-          {currentView === "media-detail" && selectedMedia && (
-            <MediaDetailView
-              media={selectedMedia}
-              episodes={mediaEpisodes}
-              onBack={() => setCurrentView("home")}
-              onOpenTorrentModal={handleOpenTorrentModal}
-              onPlayEpisode={(ep) => handleOpenTorrentModal("stream", ep)}
-              isFavorite={favorites.includes(selectedMedia.id)}
-              onToggleFavorite={handleToggleFavorite}
-              isInWatchlist={watchlist.includes(selectedMedia.id)}
-              onToggleWatchlist={handleToggleWatchlist}
-              watchedEpisodes={getWatchedEpisodesMap(selectedMedia.id)}
-              onContextMenu={handleOpenContextMenu}
-            />
-          )}
+            {currentView === "collections" && (
+              <CollectionsView
+                collections={collections}
+                watchlistMedia={watchlistMediaList}
+                favoriteMedia={favoriteMediaList}
+                mediaPool={allMediaPool}
+                activeCollectionId={activeCollectionId}
+                onOpenCollection={setActiveCollectionId}
+                onSelectMedia={handleSelectMedia}
+                onPlayMedia={handlePlayMediaDirectly}
+                favorites={favorites}
+                onToggleFavorite={handleToggleFavorite}
+                onToggleWatchlist={handleToggleWatchlist}
+                onContextMenu={handleOpenContextMenu}
+                onAddNewCollection={(name, description) => {
+                  persistCollections([
+                    ...collections,
+                    {
+                      id: `col_${Date.now()}`,
+                      name,
+                      description,
+                      mediaIds: [],
+                      createdAt: Date.now(),
+                    },
+                  ]);
+                }}
+                onDeleteCollection={(id) => {
+                  persistCollections(collections.filter((c) => c.id !== id));
+                  if (activeCollectionId === id) setActiveCollectionId(null);
+                }}
+                onRemoveFromCollection={(collectionId, mediaId) => {
+                  persistCollections(
+                    collections.map((c) =>
+                      c.id === collectionId
+                        ? { ...c, mediaIds: c.mediaIds.filter((id) => id !== mediaId) }
+                        : c
+                    )
+                  );
+                }}
+              />
+            )}
+
+            {currentView === "stats" && (
+              <StatsView
+                watchHistory={watchProgress}
+                onResumeStream={async (progress) => {
+                  const cached = StorageService.getMediaCache()[progress.mediaId];
+                  const match: MediaItem = cached || {
+                    id: progress.mediaId,
+                    title: progress.mediaTitle,
+                    mediaType: progress.mediaType,
+                    coverImage: progress.coverImage,
+                    synopsis: "",
+                    genres: [],
+                    anilistId: progress.anilistId,
+                  };
+                  const ep: Episode = {
+                    id: `ep_resume_${progress.mediaId}_${progress.episodeNumber}`,
+                    episodeNumber: progress.episodeNumber,
+                    title: `Episode ${progress.episodeNumber}`,
+                  };
+                  await handleOpenTorrentModal("stream", ep, match);
+                }}
+                onDeleteProgress={(mediaId, epNum) => {
+                  StorageService.removeWatchProgress(mediaId, epNum);
+                  setWatchProgress(StorageService.getWatchProgress());
+                }}
+                onClearHistory={() => {
+                  StorageService.clearAllWatchProgress();
+                  setWatchProgress([]);
+                }}
+              />
+            )}
+
+            {currentView === "downloads" && (
+              <div className="view-container">
+                <DownloadPanel
+                  tasks={downloadTasks}
+                  onPause={handlePauseDownload}
+                  onResume={handleResumeDownload}
+                  onCancel={handleCancelDownload}
+                  onPlayStream={(task) => {
+                    setVideoPlayer({
+                      isOpen: true,
+                      media: {
+                        id: task.id,
+                        title: task.title,
+                        mediaType: task.media_type,
+                        coverImage: "",
+                        synopsis: task.title,
+                        genres: ["Torrent Stream"],
+                      },
+                      streamUrl: task.stream_url || "",
+                      magnetUrl: task.magnet_link,
+                      torrentTitle: task.title,
+                      error: task.stream_url ? undefined : "This download does not have a streamable file yet.",
+                    });
+                  }}
+                />
+              </div>
+            )}
+
+            {currentView === "settings" && (
+              <SettingsView
+                settings={settings}
+                onSaveSettings={(updated) => {
+                  setSettings(updated);
+                  StorageService.saveSettings(updated);
+                  void invokeTauri("configure_engine_cmd", {
+                    max_concurrent: updated.maxConcurrentDownloads || 3,
+                    speed_limit_mbps: updated.speedLimitMBps || 0,
+                  }).catch(() => undefined);
+                }}
+                profile={profile}
+                onSaveProfile={(updatedProfile) => {
+                  setProfile(updatedProfile);
+                  StorageService.saveProfile(updatedProfile);
+                }}
+                onOpenAniListModal={() => setShowAniListModal(true)}
+              />
+            )}
+
+            {currentView === "media-detail" && selectedMedia && (
+              <MediaDetailView
+                media={selectedMedia}
+                episodes={mediaEpisodes}
+                onBack={goBack}
+                onOpenTorrentModal={handleOpenTorrentModal}
+                onPlayEpisode={(ep) => handleOpenTorrentModal("stream", ep)}
+                isFavorite={favorites.includes(selectedMedia.id)}
+                onToggleFavorite={handleToggleFavorite}
+                isInWatchlist={watchlist.includes(selectedMedia.id)}
+                onToggleWatchlist={handleToggleWatchlist}
+                watchedEpisodes={getWatchedEpisodesMap(selectedMedia.id)}
+                onContextMenu={handleOpenContextMenu}
+                onSelectMedia={handleSelectMedia}
+              />
+            )}
+          </Suspense>
         </main>
       </div>
 
@@ -942,7 +1260,7 @@ function MainApp() {
       <CommandPalette
         isOpen={isCommandPaletteOpen}
         onClose={() => setIsCommandPaletteOpen(false)}
-        onNavigate={setCurrentView}
+        onNavigate={navigateTo}
         onSelectMedia={handleSelectMedia}
       />
 
@@ -955,27 +1273,53 @@ function MainApp() {
         onDownload={(media, ep) => handleOpenTorrentModal("download", ep, media)}
         onToggleFavorite={handleToggleFavorite}
         onToggleWatchlist={handleToggleWatchlist}
+        onAddToCollection={(mediaId) => setCollectionPicker({ mediaId })}
         onOpenDetails={handleSelectMedia}
         onRemoveFromContinue={handleRemoveFromContinue}
       />
 
-      <TorrentPickerModal
-        isOpen={torrentModal.isOpen}
-        onClose={() => setTorrentModal((prev) => ({ ...prev, isOpen: false }))}
-        title={torrentModal.title}
-        torrents={torrentResults}
-        isLoading={isFetchingTorrents}
-        multiFiles={torrentModal.multiFiles}
-        multiFileTorrentTitle={torrentModal.selectedTorrent?.title}
-        onSelectStream={handleSelectStreamTorrent}
-        onSelectFileStream={(fileIdx) => {
-          if (torrentModal.selectedTorrent) {
-            void startStreamWithFile(torrentModal.selectedTorrent, fileIdx);
-          }
-        }}
-        onBackToTorrents={() => setTorrentModal((prev) => ({ ...prev, multiFiles: undefined }))}
-        onSelectDownload={handleSelectDownloadTorrent}
-      />
+      <Suspense fallback={null}>
+        {torrentModal.isOpen && (
+          <TorrentPickerModal
+            isOpen={torrentModal.isOpen}
+            onClose={() => setTorrentModal((prev) => ({ ...prev, isOpen: false }))}
+            title={torrentModal.title}
+            torrents={torrentResults}
+            isLoading={isFetchingTorrents}
+            multiFiles={torrentModal.multiFiles}
+            multiFileTorrentTitle={torrentModal.selectedTorrent?.title}
+            onSelectStream={handleSelectStreamTorrent}
+            onSelectFileStream={(fileIdx) => {
+              if (torrentModal.selectedTorrent) {
+                void startStreamWithFile(torrentModal.selectedTorrent, fileIdx);
+              }
+            }}
+            onBackToTorrents={() => setTorrentModal((prev) => ({ ...prev, multiFiles: undefined }))}
+            onSelectDownload={handleSelectDownloadTorrent}
+          />
+        )}
+
+        {showAniListModal && (
+          <AniListModal
+            isOpen={showAniListModal}
+            onClose={() => setShowAniListModal(false)}
+            profile={profile}
+            onProfileUpdated={(updated) => setProfile(updated)}
+          />
+        )}
+
+        {showOnboarding && (
+          <OnboardingModal
+            isOpen={showOnboarding}
+            onClose={() => setShowOnboarding(false)}
+            settings={settings}
+            onSaveSettings={(updated) => {
+              setSettings(updated);
+              StorageService.saveSettings(updated);
+            }}
+          />
+        )}
+      </Suspense>
 
       {videoPlayer.isOpen && videoPlayer.media && (
         <VideoPlayer
@@ -983,39 +1327,136 @@ function MainApp() {
           episode={videoPlayer.episode}
           streamUrl={videoPlayer.streamUrl}
           torrentTask={downloadTasks.find((t) => t.id === videoPlayer.taskId)}
+          magnetUrl={videoPlayer.magnetUrl}
+          torrentTitle={videoPlayer.torrentTitle}
+          fileIndex={videoPlayer.fileIndex}
+          startAt={videoPlayer.startAt}
+          autoPlayNext={settings.autoPlayNext}
+          hardwareAcceleration={settings.hardwareAcceleration}
+          defaultSubtitles={settings.defaultSubtitles}
+          postWatchBehavior={settings.postWatchBehavior}
           initialError={videoPlayer.error}
+          statusLabel={videoPlayer.statusLabel}
           onClose={() => {
             setVideoPlayer((prev) => ({ ...prev, isOpen: false }));
             setWatchProgress(StorageService.getWatchProgress());
           }}
-          onNextEpisode={() => {
-            if (videoPlayer.episode) {
-              const nextNum = videoPlayer.episode.episodeNumber + 1;
-              const nextEp = mediaEpisodes.find((e) => e.episodeNumber === nextNum);
-              if (nextEp && videoPlayer.media) {
-                handleOpenTorrentModal("stream", nextEp);
-              }
+          onOpenTorrentPicker={() => {
+            const media = videoPlayer.media;
+            const ep = videoPlayer.episode;
+            if (media) {
+              setVideoPlayer((prev) => ({ ...prev, isOpen: false }));
+              void handleOpenTorrentModal("stream", ep, media);
+            }
+          }}
+          onPrevEpisode={() => {
+            const media = videoPlayer.media;
+            const ep = videoPlayer.episode;
+            if (!media || !ep) return;
+            const prevEp =
+              mediaEpisodes.find(
+                (e) =>
+                  (e.seasonNumber || 1) === (ep.seasonNumber || 1) &&
+                  e.episodeNumber === ep.episodeNumber - 1
+              ) || mediaEpisodes.find((e) => e.episodeNumber === ep.episodeNumber - 1);
+            if (prevEp) void handleOpenTorrentModal("stream", prevEp, media);
+          }}
+          onNextEpisode={async () => {
+            const media = videoPlayer.media;
+            const ep = videoPlayer.episode;
+            if (!media || media.mediaType === "movie") return;
+            let list = mediaEpisodes;
+            if (!list.length || selectedMedia?.id !== media.id) {
+              const gen = ++mediaLoadGenRef.current;
+              list = await loadEpisodesForMedia(media, gen);
+            }
+            const nextEp =
+              list.find(
+                (e) =>
+                  (e.seasonNumber || 1) === (ep?.seasonNumber || 1) &&
+                  e.episodeNumber === (ep?.episodeNumber || 0) + 1
+              ) || list.find((e) => e.episodeNumber === (ep?.episodeNumber || 0) + 1);
+            if (nextEp) {
+              await handleOpenTorrentModal("stream", nextEp, media);
             }
           }}
         />
       )}
 
+      {collectionPicker && (
+        <div className="modal-backdrop" onClick={() => setCollectionPicker(null)}>
+          <div className="modal-content col-create-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="modal-header">
+              <h3>Add to collection</h3>
+            </div>
+            <div className="modal-body space-y-2">
+              {collections.length === 0 && (
+                <p className="text-xs text-zinc-400">Create a collection first from the Collections tab.</p>
+              )}
+              {collections.map((col) => {
+                const already = col.mediaIds.includes(collectionPicker.mediaId);
+                return (
+                  <button
+                    key={col.id}
+                    type="button"
+                    className="btn-secondary w-full justify-between"
+                    disabled={already}
+                    onClick={() => {
+                      persistCollections(
+                        collections.map((c) =>
+                          c.id === col.id && !c.mediaIds.includes(collectionPicker.mediaId)
+                            ? { ...c, mediaIds: [...c.mediaIds, collectionPicker.mediaId] }
+                            : c
+                        )
+                      );
+                      setCollectionPicker(null);
+                    }}
+                  >
+                    <span>{col.name}</span>
+                    <span className="text-xs text-zinc-500">{already ? "Added" : `${col.mediaIds.length} items`}</span>
+                  </button>
+                );
+              })}
+              <div className="flex justify-end pt-2">
+                <button type="button" className="btn-secondary" onClick={() => setCollectionPicker(null)}>
+                  Close
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
-      <AniListModal
-        isOpen={showAniListModal}
-        onClose={() => setShowAniListModal(false)}
-        profile={profile}
-        onProfileUpdated={(updated) => setProfile(updated)}
-      />
-
-      <OnboardingModal
-        isOpen={showOnboarding}
-        onClose={() => setShowOnboarding(false)}
-        settings={settings}
-        onSaveSettings={(updated) => {
-          setSettings(updated);
-          StorageService.saveSettings(updated);
+      <ContextMenu
+        state={contextMenu}
+        onClose={() => setContextMenu((prev) => ({ ...prev, isOpen: false }))}
+        onMarkWatched={handleMarkWatched}
+        onPlay={(media, ep) => {
+          StorageService.cacheMedia(media);
+          setSelectedMedia(media);
+          if (ep) {
+            handleOpenTorrentModal("stream", ep, media);
+          } else {
+            handlePlayMediaDirectly(media);
+          }
         }}
+        onDownload={(media, ep) => {
+          StorageService.cacheMedia(media);
+          setSelectedMedia(media);
+          handleOpenTorrentModal("download", ep, media);
+        }}
+        onToggleFavorite={handleToggleFavorite}
+        onToggleWatchlist={handleToggleWatchlist}
+        onAddToCollection={(mediaId) => {
+          if (contextMenu.media) StorageService.cacheMedia(contextMenu.media);
+          setCollectionPicker({ mediaId });
+        }}
+        onOpenDetails={(media) => {
+          StorageService.cacheMedia(media);
+          setSelectedMedia(media);
+          navigateTo("media-detail");
+        }}
+        onRemoveFromContinue={handleRemoveFromContinue}
       />
     </div>
   );

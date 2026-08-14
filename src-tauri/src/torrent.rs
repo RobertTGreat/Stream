@@ -1,8 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use librqbit::api::{Api, ApiTorrentListOpts, TorrentDetailsResponse, TorrentIdOrHash};
 use librqbit::http_api::HttpApi;
@@ -58,6 +59,8 @@ pub struct StreamInfo {
     pub title: String,
     pub selected_file_index: usize,
     pub files: Vec<TorrentFileItem>,
+    #[serde(default)]
+    pub needs_file_pick: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +87,7 @@ pub struct StreamEngine {
     api: Api,
     http_port: u16,
     meta: Arc<Mutex<HashMap<usize, TaskMeta>>>,
+    max_concurrent: Arc<Mutex<u32>>,
 }
 
 fn now_secs() -> u64 {
@@ -137,7 +141,53 @@ impl StreamEngine {
             api,
             http_port,
             meta: Arc::new(Mutex::new(HashMap::new())),
+            max_concurrent: Arc::new(Mutex::new(3)),
         })
+    }
+
+    pub fn configure(&self, max_concurrent: Option<u32>, speed_limit_mbps: Option<f64>) {
+        if let Some(max) = max_concurrent {
+            *self.max_concurrent.lock().unwrap() = max.max(1);
+            self.enforce_concurrency();
+        }
+        if let Some(mbps) = speed_limit_mbps {
+            let bps = if mbps > 0.0 {
+                NonZeroU32::new((mbps * 1_000_000.0) as u32)
+            } else {
+                None
+            };
+            self.api.session().ratelimits.set_download_bps(bps);
+        }
+    }
+
+    fn enforce_concurrency(&self) {
+        let max = *self.max_concurrent.lock().unwrap();
+        let tasks = self.list_tasks();
+        let mut active: Vec<&DownloadTask> = tasks
+            .iter()
+            .filter(|t| {
+                matches!(
+                    t.status,
+                    DownloadStatus::Downloading | DownloadStatus::Streaming | DownloadStatus::Queued
+                )
+            })
+            .collect();
+        active.sort_by_key(|t| t.created_at);
+        if active.len() as u32 <= max {
+            return;
+        }
+        for extra in active.iter().skip(max as usize) {
+            if extra.status == DownloadStatus::Streaming {
+                continue;
+            }
+            let Ok(tid) = TorrentIdOrHash::parse(&extra.id) else {
+                continue;
+            };
+            let api = self.api.clone();
+            tauri::async_runtime::spawn(async move {
+                let _ = api.api_torrent_action_pause(tid).await;
+            });
+        }
     }
 
     pub fn stream_url(&self, id: usize, file_idx: usize) -> String {
@@ -169,13 +219,9 @@ impl StreamEngine {
             .await
             .map_err(|e| format!("Failed to add torrent magnet: {e:#}"))?;
 
-        let id = match resp.id {
-            Some(id) => id,
-            None => {
-                let list = self.api.api_torrent_list_ext(ApiTorrentListOpts { with_stats: false });
-                list.torrents.first().and_then(|t| t.id).unwrap_or(0)
-            }
-        };
+        let id = resp
+            .id
+            .ok_or_else(|| "Torrent metadata loaded but no session id was returned.".to_string())?;
 
         let files = extract_torrent_files(resp.details.files.as_deref().unwrap_or(&[]));
         let recommended_file_index = pick_best_video_file_from_items(&files).unwrap_or(0);
@@ -203,8 +249,8 @@ impl StreamEngine {
         })
     }
 
-    /// Add a torrent for streaming and immediately return the HTTP stream URL.
-    /// If `file_index` is None, the largest video file is chosen.
+    /// Add a torrent once (or reuse it) and return an HTTP stream URL.
+    /// If multiple videos exist and no file/episode can be chosen, `needs_file_pick` is set.
     pub async fn start_stream(
         &self,
         title: String,
@@ -212,11 +258,15 @@ impl StreamEngine {
         magnet_link: String,
         file_index: Option<u32>,
         save_path: String,
+        season: Option<u32>,
+        episode: Option<u32>,
     ) -> Result<StreamInfo, String> {
+        if !is_valid_magnet(&magnet_link) && !looks_like_torrent_url(&magnet_link) {
+            return Err("Invalid magnet link (missing a valid info hash).".to_string());
+        }
+
         let augmented_magnet = append_trackers_to_magnet(&magnet_link);
-        let file_idx_hint = file_index.map(|f| f as usize);
         let opts = AddTorrentOptions {
-            only_files: file_idx_hint.map(|f| vec![f]),
             overwrite: true,
             output_folder: Some(save_path.clone()),
             ..Default::default()
@@ -229,48 +279,125 @@ impl StreamEngine {
             .await
             .map_err(|e| format!("Failed to start torrent stream: {e:#}"))?;
 
-        let id = match resp.id {
-            Some(id) => id,
-            None => {
-                let list = self.api.api_torrent_list_ext(ApiTorrentListOpts { with_stats: false });
-                list.torrents.first().and_then(|t| t.id).unwrap_or(0)
-            }
-        };
-        let files_raw = resp.details.files.unwrap_or_default();
-        let files = extract_torrent_files(&files_raw);
+        let id = resp
+            .id
+            .ok_or_else(|| "Torrent metadata loaded but no session id was returned.".to_string())?;
+        self.wait_until_streamable(id).await?;
 
-        let file_idx = match file_idx_hint {
-            Some(f) if f < files.len() => f,
-            _ => pick_best_video_file_from_items(&files)
-                .ok_or_else(|| "No video files found in torrent".to_string())?,
-        };
+        let files = extract_torrent_files(resp.details.files.as_deref().unwrap_or(&[]));
+        let video_files: Vec<&TorrentFileItem> = files.iter().filter(|f| f.is_video).collect();
+        if video_files.is_empty() {
+            return Err("No video files found in torrent".to_string());
+        }
+
+        let chosen = file_index
+            .map(|f| f as usize)
+            .filter(|f| *f < files.len() && files[*f].is_video)
+            .or_else(|| pick_episode_file(&files, season, episode))
+            .or_else(|| {
+                if video_files.len() == 1 {
+                    Some(video_files[0].index)
+                } else {
+                    None
+                }
+            });
 
         let torrent_title = resp.details.name.unwrap_or_else(|| title.clone());
         let created_at = now_secs();
+
+        if let Some(file_idx) = chosen {
+            let tid = TorrentIdOrHash::parse(&id.to_string()).map_err(|e| e.to_string())?;
+            let only = HashSet::from([file_idx]);
+            self.api
+                .api_torrent_action_update_only_files(tid, &only)
+                .await
+                .map_err(|e| format!("Could not select the video file: {e:#}"))?;
+            self.api
+                .api_stream(tid, file_idx)
+                .map_err(|e| format!("Stream is not ready yet: {e:#}"))?;
+
+            self.meta.lock().unwrap().insert(
+                id,
+                TaskMeta {
+                    title: torrent_title.clone(),
+                    media_type,
+                    magnet_link: augmented_magnet,
+                    seeders: 0,
+                    peers: 0,
+                    is_stream: true,
+                    stream_file_idx: Some(file_idx),
+                    created_at,
+                },
+            );
+
+            return Ok(StreamInfo {
+                task_id: id.to_string(),
+                stream_url: self.stream_url(id, file_idx),
+                is_ready: true,
+                buffered_percent: 0.0,
+                title: torrent_title,
+                selected_file_index: file_idx,
+                files,
+                needs_file_pick: false,
+            });
+        }
 
         self.meta.lock().unwrap().insert(
             id,
             TaskMeta {
                 title: torrent_title.clone(),
                 media_type,
-                magnet_link,
+                magnet_link: augmented_magnet,
                 seeders: 0,
                 peers: 0,
                 is_stream: true,
-                stream_file_idx: Some(file_idx),
+                stream_file_idx: None,
                 created_at,
             },
         );
 
         Ok(StreamInfo {
             task_id: id.to_string(),
-            stream_url: self.stream_url(id, file_idx),
-            is_ready: true,
+            stream_url: String::new(),
+            is_ready: false,
             buffered_percent: 0.0,
             title: torrent_title,
-            selected_file_index: file_idx,
+            selected_file_index: 0,
             files,
+            needs_file_pick: true,
         })
+    }
+
+    async fn wait_until_streamable(&self, id: usize) -> Result<(), String> {
+        let tid = TorrentIdOrHash::parse(&id.to_string()).map_err(|e| e.to_string())?;
+        let handle = self.api.mgr_handle(tid).map_err(|e| e.to_string())?;
+        tokio::time::timeout(Duration::from_secs(90), handle.wait_until_initialized())
+            .await
+            .map_err(|_| {
+                "Timed out waiting for the torrent to finish initializing. Try again in a moment."
+                    .to_string()
+            })?
+            .map_err(|e| format!("Torrent failed to initialize: {e:#}"))?;
+
+        if handle.live().is_none() {
+            let _ = self.api.api_torrent_action_start(tid).await;
+            let started = tokio::time::timeout(Duration::from_secs(20), async {
+                loop {
+                    if handle.live().is_some() {
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+            })
+            .await;
+            if started.is_err() && handle.live().is_none() {
+                return Err(
+                    "Torrent initialized but did not go live. It may be paused or errored."
+                        .to_string(),
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Add a torrent for full background download.
@@ -314,6 +441,7 @@ impl StreamEngine {
             },
         );
 
+        self.enforce_concurrency();
         self.list_tasks()
             .into_iter()
             .find(|t| t.id == id.to_string())
@@ -357,6 +485,7 @@ impl StreamEngine {
             .api_torrent_action_start(tid)
             .await
             .map_err(|e| e.to_string())?;
+        self.enforce_concurrency();
         Ok(true)
     }
 
@@ -479,4 +608,68 @@ fn pick_best_video_file_from_items(files: &[TorrentFileItem]) -> Option<usize> {
         .max_by_key(|f| f.length)
         .map(|f| f.index)
         .or_else(|| files.iter().max_by_key(|f| f.length).map(|f| f.index))
+}
+
+fn is_valid_magnet(magnet: &str) -> bool {
+    let trimmed = magnet.trim();
+    if !trimmed.to_ascii_lowercase().starts_with("magnet:?") {
+        return false;
+    }
+    regex::Regex::new(r"(?i)urn:btih:([a-fA-F0-9]{40}|[a-zA-Z2-7]{32})")
+        .ok()
+        .map(|re| re.is_match(trimmed))
+        .unwrap_or(false)
+}
+
+fn looks_like_torrent_url(value: &str) -> bool {
+    let lower = value.to_ascii_lowercase();
+    lower.starts_with("http://") || lower.starts_with("https://") || lower.ends_with(".torrent")
+}
+
+fn pick_episode_file(
+    files: &[TorrentFileItem],
+    season: Option<u32>,
+    episode: Option<u32>,
+) -> Option<usize> {
+    let episode = episode?;
+    let season = season.unwrap_or(1);
+    let videos: Vec<&TorrentFileItem> = files.iter().filter(|f| f.is_video).collect();
+    if videos.len() <= 1 {
+        return videos.first().map(|f| f.index);
+    }
+
+    let padded_ep = format!("{episode:02}");
+    let padded_season = format!("{season:02}");
+    let mut scored: Vec<(i32, usize)> = videos
+        .iter()
+        .map(|file| {
+            let name = file.name.to_ascii_lowercase();
+            let mut score = 0;
+            if name.contains(&format!("s{padded_season}e{padded_ep}"))
+                || name.contains(&format!("s{season}e{episode}"))
+                || name.contains(&format!("s{padded_season}e{episode}"))
+            {
+                score += 100;
+            }
+            if name.contains(&format!(" - {padded_ep}"))
+                || name.contains(&format!(" - {episode}."))
+                || name.contains(&format!("e{padded_ep}"))
+                || name.contains(&format!("ep{padded_ep}"))
+                || name.contains(&format!("episode {episode}"))
+            {
+                score += 40;
+            }
+            if name.contains(&padded_ep) {
+                score += 10;
+            }
+            (score, file.index)
+        })
+        .filter(|(score, _)| *score > 0)
+        .collect();
+
+    scored.sort_by(|a, b| b.0.cmp(&a.0));
+    if scored.len() == 1 || scored.get(0).zip(scored.get(1)).is_some_and(|(a, b)| a.0 > b.0) {
+        return scored.first().map(|s| s.1);
+    }
+    None
 }

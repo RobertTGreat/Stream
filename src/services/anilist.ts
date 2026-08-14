@@ -1,4 +1,5 @@
-import { Episode, MediaItem } from "../types";
+import { Episode, MediaItem, UserListProgressEntry, AiringScheduleItem, FranchiseSeason, MediaType } from "../types";
+export type { UserListProgressEntry, AiringScheduleItem, FranchiseSeason };
 import { StorageService } from "./storage";
 
 const ANILIST_ENDPOINT = "https://graphql.anilist.co";
@@ -38,9 +39,9 @@ query ($page: Int, $perPage: Int) {
 `;
 
 const SEARCH_ANIME_QUERY = `
-query ($search: String, $genre: String, $year: Int, $format: MediaFormat) {
-  Page(page: 1, perPage: 24) {
-    media(type: ANIME, search: $search, genre: $genre, seasonYear: $year, format: $format, sort: POPULARITY_DESC) {
+query ($search: String, $genre: String, $year: Int, $format: MediaFormat, $sort: [MediaSort]) {
+  Page(page: 1, perPage: 36) {
+    media(type: ANIME, search: $search, genre: $genre, seasonYear: $year, format: $format, sort: $sort) {
       id
       idMal
       title {
@@ -82,6 +83,11 @@ query ($id: Int) {
     status
     format
     seasonYear
+    startDate {
+      year
+      month
+      day
+    }
     averageScore
     genres
     nextAiringEpisode {
@@ -113,6 +119,35 @@ query ($id: Int) {
       status
       progress
       score
+    }
+    relations {
+      edges {
+        relationType
+        node {
+          id
+          idMal
+          title {
+            romaji
+            english
+            native
+          }
+          coverImage {
+            extraLarge
+            large
+          }
+          bannerImage
+          format
+          status
+          seasonYear
+          startDate {
+            year
+            month
+            day
+          }
+          episodes
+          averageScore
+        }
+      }
     }
   }
 }
@@ -172,13 +207,13 @@ query ($userId: Int) {
 `;
 
 const AIRING_SCHEDULE_QUERY = `
-query ($weekStart: Int, $weekEnd: Int, $page: Int) {
+query ($weekStart: Int, $weekEnd: Int, $mediaId_in: [Int], $page: Int) {
   Page(page: $page, perPage: 50) {
     pageInfo {
       hasNextPage
       currentPage
     }
-    airingSchedules(airingAt_greater: $weekStart, airingAt_lesser: $weekEnd, sort: TIME) {
+    airingSchedules(airingAt_greater: $weekStart, airingAt_lesser: $weekEnd, mediaId_in: $mediaId_in, sort: TIME) {
       id
       airingAt
       timeUntilAiring
@@ -211,33 +246,224 @@ mutation ($mediaId: Int, $progress: Int, $status: MediaListStatus, $score: Float
 }
 `;
 
-export interface UserListProgressEntry {
-  media: MediaItem;
-  progress: number;
-  episodesCount: number;
-  nextEpisodeTitle?: string;
-  thumbnail?: string;
+const FRANCHISE_RELATIONS_QUERY = `
+query ($ids: [Int]) {
+  Page(page: 1, perPage: 50) {
+    media(id_in: $ids, type: ANIME) {
+      id
+      idMal
+      title {
+        romaji
+        english
+        native
+      }
+      coverImage {
+        extraLarge
+        large
+      }
+      bannerImage
+      format
+      status
+      seasonYear
+      startDate {
+        year
+        month
+        day
+      }
+      episodes
+      averageScore
+      relations {
+        edges {
+          relationType
+          node {
+            id
+            idMal
+            title {
+              romaji
+              english
+              native
+            }
+            coverImage {
+              extraLarge
+              large
+            }
+            bannerImage
+            format
+            status
+            seasonYear
+            startDate {
+              year
+              month
+              day
+            }
+            episodes
+            averageScore
+          }
+        }
+      }
+    }
+  }
 }
-
-export interface AiringScheduleItem {
-  id: number;
-  airingAt: number;
-  episode: number;
-  mediaId: number;
-  mediaTitle: string;
-  coverImage: string;
-  bannerImage?: string;
-  dayOfMonth: number; // 1-31
-  /** 0=Mon … 6=Sun */
-  dayOfWeek: number;
-  /** Local calendar key YYYY-M-D for exact cell matching */
-  dateKey: string;
-  isUserTracked?: boolean;
-  isWatched?: boolean;
-}
+`;
 
 function localDateKey(d: Date): string {
   return `${d.getFullYear()}-${d.getMonth() + 1}-${d.getDate()}`;
+}
+
+function parseSeasonFromTitle(title: string): number | undefined {
+  const match =
+    title.match(/\bseason\s*(\d+)\b/i) ||
+    title.match(/\b(\d+)(?:st|nd|rd|th)\s*season\b/i) ||
+    title.match(/\bs(\d+)\b/i);
+  if (!match?.[1]) return undefined;
+  const n = parseInt(match[1], 10);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+const franchiseMemoryCache = new Map<number, FranchiseSeason[]>();
+
+async function fetchDeepFranchiseSeasons(currentMediaRaw: any): Promise<FranchiseSeason[]> {
+  const currentId = currentMediaRaw.id;
+  if (franchiseMemoryCache.has(currentId)) {
+    return franchiseMemoryCache.get(currentId)!;
+  }
+
+  const nodesMap = new Map<number, any>();
+  const visitedIds = new Set<number>();
+  const toVisitIds = new Set<number>();
+
+  const ingestNode = (node: any, rawRelations?: any[]) => {
+    if (!node || !node.id) return;
+    if (!nodesMap.has(node.id)) {
+      nodesMap.set(node.id, node);
+    }
+    const edges = rawRelations || node.relations?.edges || [];
+    for (const edge of edges) {
+      const target = edge.node;
+      if (!target || !target.id) continue;
+      const rel = edge.relationType;
+      if (["PREQUEL", "SEQUEL", "PARENT", "SIDE_STORY", "ALTERNATIVE", "SPIN_OFF", "COMPILATION", "SUMMARY"].includes(rel)) {
+        const fmt = target.format;
+        if (!fmt || ["TV", "TV_SHORT", "OVA", "MOVIE", "SPECIAL"].includes(fmt)) {
+          if (!nodesMap.has(target.id)) {
+            nodesMap.set(target.id, target);
+          }
+          if (!visitedIds.has(target.id)) {
+            toVisitIds.add(target.id);
+          }
+        }
+      }
+    }
+  };
+
+  visitedIds.add(currentId);
+  ingestNode(currentMediaRaw, currentMediaRaw.relations?.edges);
+
+  // Multi-deep traversal for prequels, sequels, and parent nodes (up to depth 4)
+  let depth = 0;
+  while (toVisitIds.size > 0 && depth < 4) {
+    depth++;
+    const batchIds = Array.from(toVisitIds).slice(0, 30);
+    toVisitIds.clear();
+
+    for (const id of batchIds) {
+      visitedIds.add(id);
+    }
+
+    try {
+      const response = await fetch(ANILIST_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          query: FRANCHISE_RELATIONS_QUERY,
+          variables: { ids: batchIds },
+        }),
+      });
+
+      if (response.ok) {
+        const json = await response.json();
+        const mediaList = json.data?.Page?.media || [];
+        for (const m of mediaList) {
+          ingestNode(m);
+        }
+      }
+    } catch {
+      break;
+    }
+  }
+
+  const items = Array.from(nodesMap.values());
+  if (items.length <= 1) {
+    const emptyList: FranchiseSeason[] = [];
+    franchiseMemoryCache.set(currentId, emptyList);
+    return emptyList;
+  }
+
+  // Sort chronologically by startDate / seasonYear, then ID
+  items.sort((a, b) => {
+    const titleA = a.title?.english || a.title?.romaji || "";
+    const titleB = b.title?.english || b.title?.romaji || "";
+    const seasonA = parseSeasonFromTitle(titleA);
+    const seasonB = parseSeasonFromTitle(titleB);
+
+    if (seasonA != null && seasonB != null && seasonA !== seasonB) {
+      return seasonA - seasonB;
+    }
+
+    const dateA = (a.startDate?.year || a.seasonYear || 9999) * 10000 + (a.startDate?.month || 1) * 100 + (a.startDate?.day || 1);
+    const dateB = (b.startDate?.year || b.seasonYear || 9999) * 10000 + (b.startDate?.month || 1) * 100 + (b.startDate?.day || 1);
+    if (dateA !== dateB) return dateA - dateB;
+
+    return a.id - b.id;
+  });
+
+  let tvCount = 0;
+  let movieCount = 0;
+  let ovaCount = 0;
+
+  const result: FranchiseSeason[] = items.map((item) => {
+    const title = item.title?.english || item.title?.romaji || item.title?.native || `Season ${tvCount + 1}`;
+    const format = item.format || "TV";
+
+    let seasonLabel = "";
+    let seasonNumber = 1;
+
+    if (format === "MOVIE") {
+      movieCount++;
+      seasonLabel = movieCount > 1 ? `Movie ${movieCount}` : "Movie";
+      seasonNumber = movieCount;
+    } else if (format === "OVA" || format === "SPECIAL") {
+      ovaCount++;
+      seasonLabel = ovaCount > 1 ? `OVA ${ovaCount}` : "OVA";
+      seasonNumber = ovaCount;
+    } else {
+      tvCount++;
+      seasonNumber = tvCount;
+      seasonLabel = `S${seasonNumber}`;
+    }
+
+    return {
+      id: `ani_${item.id}`,
+      anilistId: item.id,
+      seasonNumber,
+      seasonLabel,
+      title,
+      year: item.seasonYear || item.startDate?.year,
+      episodesCount: item.episodes,
+      coverImage: item.coverImage?.extraLarge || item.coverImage?.large,
+      bannerImage: item.bannerImage,
+      format: item.format,
+      status: item.status,
+      score: item.averageScore ? Math.round(item.averageScore) / 10 : undefined,
+      mediaType: "anime" as MediaType,
+    };
+  });
+
+  for (const item of items) {
+    franchiseMemoryCache.set(item.id, result);
+  }
+
+  return result;
 }
 
 export class AniListService {
@@ -252,13 +478,13 @@ export class AniListService {
         }),
       });
 
-      if (!response.ok) throw new Error("AniList response error");
+      if (!response.ok) throw new Error(`AniList response error (${response.status})`);
       const json = await response.json();
+      if (json.errors?.length) throw new Error(json.errors[0]?.message || "AniList GraphQL error");
       const mediaList = json.data?.Page?.media || [];
       return mediaList.map((m: any) => this.formatAniListMedia(m));
     } catch (e) {
-      console.warn("AniList API fallback used:", e);
-      return MOCK_ANIME_ITEMS;
+      throw e instanceof Error ? e : new Error("AniList trending request failed");
     }
   }
 
@@ -303,6 +529,10 @@ export class AniListService {
         }
       }
 
+      if (entries.length > 0) {
+        StorageService.saveUserWatchingCache(entries);
+      }
+
       return entries;
     } catch (e) {
       console.warn("AniList user watching list fallback:", e);
@@ -312,27 +542,61 @@ export class AniListService {
 
   static async fetchUserTrackedMediaMap(): Promise<Map<number, number>> {
     const map = new Map<number, number>();
+
+    // 1. Local watchlist, favorites, and watch progress
+    const progressList = StorageService.getWatchProgress();
+    for (const p of progressList) {
+      if (p.anilistId) {
+        map.set(p.anilistId, p.episodeNumber || 0);
+      } else if (p.mediaId.startsWith("ani_")) {
+        const id = parseInt(p.mediaId.replace("ani_", ""), 10);
+        if (Number.isFinite(id)) map.set(id, p.episodeNumber || 0);
+      }
+    }
+
+    const watchlist = StorageService.getWatchlist();
+    for (const idStr of watchlist) {
+      if (idStr.startsWith("ani_")) {
+        const id = parseInt(idStr.replace("ani_", ""), 10);
+        if (Number.isFinite(id) && !map.has(id)) map.set(id, 0);
+      }
+    }
+
+    const favorites = StorageService.getFavorites();
+    for (const idStr of favorites) {
+      if (idStr.startsWith("ani_")) {
+        const id = parseInt(idStr.replace("ani_", ""), 10);
+        if (Number.isFinite(id) && !map.has(id)) map.set(id, 0);
+      }
+    }
+
+    // 2. AniList user lists (CURRENT, PLANNING, REPEATING, PAUSED)
     try {
       const profile = StorageService.getProfile();
-      if (!profile.anilistUser?.id) return map;
+      if (profile.anilistUser?.id) {
+        const response = await fetch(ANILIST_ENDPOINT, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({
+            query: USER_ALL_LISTS_QUERY,
+            variables: { userId: profile.anilistUser.id },
+          }),
+        });
 
-      const response = await fetch(ANILIST_ENDPOINT, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "application/json" },
-        body: JSON.stringify({
-          query: USER_ALL_LISTS_QUERY,
-          variables: { userId: profile.anilistUser.id },
-        }),
-      });
+        if (response.ok) {
+          const json = await response.json();
+          const lists = json.data?.MediaListCollection?.lists || [];
 
-      if (!response.ok) return map;
-      const json = await response.json();
-      const lists = json.data?.MediaListCollection?.lists || [];
+          for (const list of lists) {
+            const status = (list.status || "").toUpperCase();
+            // Exclude DROPPED and COMPLETED lists from active airing schedule
+            if (status === "DROPPED" || status === "COMPLETED") continue;
 
-      for (const list of lists) {
-        for (const entry of list.entries || []) {
-          if (entry.mediaId) {
-            map.set(entry.mediaId, entry.progress || 0);
+            for (const entry of list.entries || []) {
+              if (entry.mediaId) {
+                map.set(entry.mediaId, entry.progress || 0);
+              }
+            }
           }
         }
       }
@@ -343,7 +607,7 @@ export class AniListService {
   }
 
   /**
-   * Full-month airing schedule (paginated). Prefer this for the home calendar.
+   * Full-month airing schedule (paginated / targeted). Complete across all days 1-31.
    * @param year full year e.g. 2026
    * @param month 0-indexed month (Date style)
    */
@@ -353,50 +617,27 @@ export class AniListService {
     myListsOnly = true
   ): Promise<AiringScheduleItem[]> {
     try {
-      const rangeStart = new Date(year, month, 1, 0, 0, 0, 0);
-      const rangeEnd = new Date(year, month + 1, 0, 23, 59, 59, 999);
-      const weekStart = Math.floor(rangeStart.getTime() / 1000) - 1;
-      const weekEnd = Math.floor(rangeEnd.getTime() / 1000) + 1;
-
       const cacheKey = `stream_airing_${year}_${month}_${myListsOnly ? "mine" : "all"}`;
-      try {
-        const cached = sessionStorage.getItem(cacheKey);
-        if (cached) {
-          const parsed = JSON.parse(cached) as { at: number; items: AiringScheduleItem[] };
-          if (Date.now() - parsed.at < 10 * 60 * 1000 && Array.isArray(parsed.items)) {
-            return parsed.items;
-          }
-        }
-      } catch {
-        // ignore cache
+      const cached = StorageService.getMonthlyAiringCache(cacheKey);
+      if (cached && cached.length > 0) {
+        return cached;
       }
 
       const userMap = await this.fetchUserTrackedMediaMap();
+
+      // If user selected "My list" but has no tracked anime, return empty list
+      if (myListsOnly && userMap.size === 0) {
+        return [];
+      }
+
       const result: AiringScheduleItem[] = [];
-      let page = 1;
-      let hasNext = true;
-      const maxPages = 12;
+      const seenIds = new Set<number>();
 
-      while (hasNext && page <= maxPages) {
-        const response = await fetch(ANILIST_ENDPOINT, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Accept: "application/json" },
-          body: JSON.stringify({
-            query: AIRING_SCHEDULE_QUERY,
-            variables: { weekStart, weekEnd, page },
-          }),
-        });
-
-        if (!response.ok) throw new Error("Airing schedule error");
-        const json = await response.json();
-        const pageData = json.data?.Page;
-        const rawSchedules = pageData?.airingSchedules || [];
-        hasNext = Boolean(pageData?.pageInfo?.hasNextPage);
-        page += 1;
-
+      const parseSchedules = (rawSchedules: any[]) => {
         for (const s of rawSchedules) {
+          if (!s || seenIds.has(s.id)) continue;
+          seenIds.add(s.id);
           const date = new Date(s.airingAt * 1000);
-          // Only keep items that land in the requested local month
           if (date.getFullYear() !== year || date.getMonth() !== month) continue;
 
           let day = date.getDay() - 1;
@@ -406,7 +647,7 @@ export class AniListService {
           const isTracked = userProgress !== undefined;
           const isWatched = isTracked && userProgress! >= s.episode;
 
-          if (myListsOnly && userMap.size > 0 && !isTracked) {
+          if (myListsOnly && !isTracked) {
             continue;
           }
 
@@ -425,24 +666,103 @@ export class AniListService {
             isWatched,
           });
         }
+      };
+
+      const daysInMonth = new Date(year, month + 1, 0).getDate();
+      const monthStart = Math.floor(new Date(year, month, 1, 0, 0, 0, 0).getTime() / 1000) - 1;
+      const monthEnd = Math.floor(new Date(year, month, daysInMonth, 23, 59, 59, 999).getTime() / 1000) + 1;
+
+      if (myListsOnly) {
+        // Targeted query for only user's tracked anime for the full month
+        const mediaIds = Array.from(userMap.keys());
+        let page = 1;
+        let hasNext = true;
+        while (hasNext && page <= 4) {
+          const res = await fetch(ANILIST_ENDPOINT, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Accept: "application/json" },
+            body: JSON.stringify({
+              query: AIRING_SCHEDULE_QUERY,
+              variables: { weekStart: monthStart, weekEnd: monthEnd, mediaId_in: mediaIds, page },
+            }),
+          });
+          if (!res.ok) break;
+          const json = await res.json();
+          const pageData = json.data?.Page;
+          parseSchedules(pageData?.airingSchedules || []);
+          hasNext = Boolean(pageData?.pageInfo?.hasNextPage);
+          page += 1;
+        }
+      } else {
+        // Parallel weekly slices so all days 1-31 of the month are fully retrieved without truncation
+        const slices: { start: number; end: number }[] = [
+          {
+            start: Math.floor(new Date(year, month, 1, 0, 0, 0, 0).getTime() / 1000) - 1,
+            end: Math.floor(new Date(year, month, 7, 23, 59, 59, 999).getTime() / 1000) + 1,
+          },
+          {
+            start: Math.floor(new Date(year, month, 8, 0, 0, 0, 0).getTime() / 1000) - 1,
+            end: Math.floor(new Date(year, month, 14, 23, 59, 59, 999).getTime() / 1000) + 1,
+          },
+          {
+            start: Math.floor(new Date(year, month, 15, 0, 0, 0, 0).getTime() / 1000) - 1,
+            end: Math.floor(new Date(year, month, 21, 23, 59, 59, 999).getTime() / 1000) + 1,
+          },
+          {
+            start: Math.floor(new Date(year, month, 22, 0, 0, 0, 0).getTime() / 1000) - 1,
+            end: Math.floor(new Date(year, month, 28, 23, 59, 59, 999).getTime() / 1000) + 1,
+          },
+        ];
+        if (daysInMonth > 28) {
+          slices.push({
+            start: Math.floor(new Date(year, month, 29, 0, 0, 0, 0).getTime() / 1000) - 1,
+            end: Math.floor(new Date(year, month, daysInMonth, 23, 59, 59, 999).getTime() / 1000) + 1,
+          });
+        }
+
+        const responses = await Promise.all(
+          slices.flatMap((slice) => [
+            fetch(ANILIST_ENDPOINT, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Accept: "application/json" },
+              body: JSON.stringify({
+                query: AIRING_SCHEDULE_QUERY,
+                variables: { weekStart: slice.start, weekEnd: slice.end, page: 1 },
+              }),
+            })
+              .then((r) => (r.ok ? r.json() : null))
+              .catch(() => null),
+            fetch(ANILIST_ENDPOINT, {
+              method: "POST",
+              headers: { "Content-Type": "application/json", Accept: "application/json" },
+              body: JSON.stringify({
+                query: AIRING_SCHEDULE_QUERY,
+                variables: { weekStart: slice.start, weekEnd: slice.end, page: 2 },
+              }),
+            })
+              .then((r) => (r.ok ? r.json() : null))
+              .catch(() => null),
+          ])
+        );
+
+        for (const json of responses) {
+          if (json?.data?.Page?.airingSchedules) {
+            parseSchedules(json.data.Page.airingSchedules);
+          }
+        }
       }
 
       // Stable order: time then title
       result.sort((a, b) => a.airingAt - b.airingAt || a.mediaTitle.localeCompare(b.mediaTitle));
 
-      try {
-        sessionStorage.setItem(cacheKey, JSON.stringify({ at: Date.now(), items: result }));
-      } catch {
-        // quota
+      if (result.length > 0) {
+        StorageService.saveMonthlyAiringCache(cacheKey, result);
       }
 
       return result;
     } catch (e) {
       console.warn("Airing schedule fallback:", e);
-      return MOCK_SCHEDULE_ITEMS.map((item) => ({
-        ...item,
-        dateKey: item.dateKey || `2026-8-${item.dayOfMonth}`,
-      }));
+      return [];
     }
   }
 
@@ -452,11 +772,25 @@ export class AniListService {
     return this.fetchMonthlyAiringSchedule(now.getFullYear(), now.getMonth(), myListsOnly);
   }
 
+  static async fetchAnimeBySort(
+    sort: "TRENDING_DESC" | "POPULARITY_DESC" | "SCORE_DESC" | "START_DATE_DESC",
+    genre?: string
+  ): Promise<MediaItem[]> {
+    if (sort === "TRENDING_DESC" && (!genre || genre === "All")) {
+      return this.fetchTrending();
+    }
+    return this.searchAnime({
+      genre: genre && genre !== "All" ? genre : undefined,
+      sort: [sort],
+    });
+  }
+
   static async searchAnime(params: {
     query?: string;
     genre?: string;
     year?: number;
     format?: string;
+    sort?: string[];
   }): Promise<MediaItem[]> {
     try {
       const response = await fetch(ANILIST_ENDPOINT, {
@@ -469,22 +803,18 @@ export class AniListService {
             genre: params.genre || undefined,
             year: params.year || undefined,
             format: params.format || undefined,
+            sort: params.sort || ["POPULARITY_DESC"],
           },
         }),
       });
 
-      if (!response.ok) throw new Error("AniList search error");
+      if (!response.ok) throw new Error(`AniList search error (${response.status})`);
       const json = await response.json();
+      if (json.errors?.length) throw new Error(json.errors[0]?.message || "AniList GraphQL error");
       const mediaList = json.data?.Page?.media || [];
       return mediaList.map((m: any) => this.formatAniListMedia(m));
     } catch (e) {
-      console.warn("AniList search fallback used:", e);
-      let list = [...MOCK_ANIME_ITEMS];
-      if (params.query) {
-        const q = params.query.toLowerCase();
-        list = list.filter((item) => item.title.toLowerCase().includes(q) || item.genres.some((g) => g.toLowerCase().includes(q)));
-      }
-      return list;
+      throw e instanceof Error ? e : new Error("AniList search failed");
     }
   }
 
@@ -514,35 +844,95 @@ export class AniListService {
       const totalEp = raw.episodes || 12;
       const streaming = raw.streamingEpisodes || [];
 
+      const nextAiringEp = raw.nextAiringEpisode?.episode;
+      const isNotYetReleased = media.status === "NOT_YET_RELEASED";
+
+      const seasonHint = parseSeasonFromTitle(media.title);
       const episodes: Episode[] = Array.from({ length: totalEp }, (_, idx) => {
         const epNum = idx + 1;
         const streamInfo = streaming.find((s: any) => s.title?.includes(`Episode ${epNum}`) || s.title?.includes(`${epNum}`));
+        const isUnreleased = isNotYetReleased || (nextAiringEp != null && epNum >= nextAiringEp);
         return {
           id: `ep_ani_${anilistId}_${epNum}`,
           episodeNumber: epNum,
-          seasonNumber: 1,
+          seasonNumber: seasonHint || 1,
           title: streamInfo?.title || `Episode ${epNum}`,
-          synopsis: `Watch episode ${epNum} of ${media.title}. High definition 1080p stream.`,
+          synopsis: isUnreleased ? `Episode ${epNum} has not yet aired.` : `Watch episode ${epNum} of ${media.title}.`,
           thumbnail: streamInfo?.thumbnail || media.bannerImage || media.coverImage,
           durationMinutes: 24,
-          airDate: "2024",
+          airDate: String(media.year || ""),
+          unreleased: isUnreleased,
         };
       });
 
+      media.relatedSeasons = await fetchDeepFranchiseSeasons(raw);
+
       return { media, episodes };
     } catch (e) {
-      console.warn("AniList detail fallback:", e);
-      const item = MOCK_ANIME_ITEMS.find((m) => m.anilistId === anilistId) || MOCK_ANIME_ITEMS[0];
-      const episodes: Episode[] = Array.from({ length: item.episodesCount || 12 }, (_, i) => ({
-        id: `ep_mock_${i + 1}`,
-        episodeNumber: i + 1,
-        seasonNumber: 1,
-        title: `Episode ${i + 1}`,
-        synopsis: `Official episode ${i + 1} narrative event overview.`,
-        thumbnail: item.bannerImage || item.coverImage,
-        durationMinutes: 24,
-      }));
-      return { media: item, episodes };
+      throw e instanceof Error ? e : new Error("AniList detail request failed");
+    }
+  }
+
+  /**
+   * Fetch related and recommended media for an anime
+   */
+  static async fetchRecommendations(anilistId: number): Promise<MediaItem[]> {
+    const query = `
+      query ($id: Int) {
+        Media (id: $id) {
+          recommendations (perPage: 14, sort: RATING_DESC) {
+            nodes {
+              mediaRecommendation {
+                id
+                idMal
+                title {
+                  romaji
+                  english
+                  native
+                }
+                coverImage {
+                  extraLarge
+                  large
+                }
+                bannerImage
+                description
+                format
+                episodes
+                status
+                averageScore
+                genres
+                seasonYear
+              }
+            }
+          }
+        }
+      }
+    `;
+
+    try {
+      const response = await fetch(ANILIST_ENDPOINT, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "application/json" },
+        body: JSON.stringify({
+          query,
+          variables: { id: anilistId },
+        }),
+      });
+
+      if (!response.ok) return [];
+      const json = await response.json();
+      const nodes = json.data?.Media?.recommendations?.nodes || [];
+      const items: MediaItem[] = [];
+
+      for (const node of nodes) {
+        if (node.mediaRecommendation) {
+          items.push(this.formatAniListMedia(node.mediaRecommendation));
+        }
+      }
+
+      return items;
+    } catch {
+      return [];
     }
   }
 
@@ -608,7 +998,7 @@ export class AniListService {
     return {
       id: `ani_${m.id}`,
       anilistId: m.id,
-      tmdbId: m.idMal,
+      malId: m.idMal,
       title,
       japaneseTitle: m.title?.native,
       mediaType: "anime",

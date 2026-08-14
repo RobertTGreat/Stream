@@ -29,4 +29,20 @@ export default defineConfig(async () => ({
       ignored: ["**/src-tauri/**"],
     },
   },
+  build: {
+    target: "esnext",
+    minify: "esbuild",
+    cssMinify: true,
+    rollupOptions: {
+      output: {
+        manualChunks: {
+          vendor_react: ["react", "react-dom"],
+          vendor_query: ["@tanstack/react-query"],
+          vendor_motion: ["motion"],
+          vendor_icons: ["lucide-react"],
+        },
+      },
+    },
+  },
 }));
+

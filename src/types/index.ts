@@ -4,10 +4,29 @@ export type MediaFormat = "TV" | "MOVIE" | "OVA" | "SPECIAL" | "SERIES";
 
 export type MediaStatus = "RELEASING" | "FINISHED" | "NOT_YET_RELEASED" | "CANCELLED";
 
+export interface FranchiseSeason {
+  id: string;
+  seasonNumber: number;
+  seasonLabel: string;
+  title: string;
+  year?: number;
+  episodesCount?: number;
+  coverImage?: string;
+  bannerImage?: string;
+  format?: string;
+  status?: string;
+  score?: number;
+  mediaType: MediaType;
+  anilistId?: number;
+  tmdbId?: number;
+}
+
 export interface MediaItem {
   id: string;
   tmdbId?: number;
   anilistId?: number;
+  malId?: number;
+  imdbId?: string;
   title: string;
   japaneseTitle?: string;
   mediaType: MediaType;
@@ -24,6 +43,7 @@ export interface MediaItem {
   studio?: string;
   cast?: { name: string; role: string; avatar?: string }[];
   nextAiringEpisode?: { episode: number; timeUntilAiring: number };
+  relatedSeasons?: FranchiseSeason[];
 }
 
 export interface Episode {
@@ -36,6 +56,7 @@ export interface Episode {
   durationMinutes?: number;
   videoUrl?: string;
   airDate?: string;
+  unreleased?: boolean;
 }
 
 export interface LocalMediaItem {
@@ -49,6 +70,11 @@ export interface LocalMediaItem {
   size_bytes: number;
   extension: string;
   last_modified: number;
+}
+
+export interface ScanLibraryResult {
+  items: LocalMediaItem[];
+  error?: string | null;
 }
 
 export interface TorrentFileItem {
@@ -73,6 +99,7 @@ export interface StreamInfo {
   title: string;
   selected_file_index: number;
   files: TorrentFileItem[];
+  needs_file_pick?: boolean;
 }
 
 export interface MpvTrack {
@@ -131,12 +158,27 @@ export interface StreamProgress {
   currentTime: number;
   duration: number;
   percentage: number;
+  completed?: boolean;
+  progressSeconds?: number;
   lastUpdated: number;
   anilistId?: number;
   magnetUrl?: string;
   torrentTitle?: string;
   streamUrl?: string;
   fileIndex?: number;
+}
+
+export interface RememberedTorrent {
+  mediaId: string;
+  mediaType: MediaType;
+  seasonNumber?: number;
+  episodeNumber?: number;
+  magnetUrl: string;
+  torrentTitle: string;
+  fileIndex?: number;
+  isPack: boolean;
+  seeders?: number;
+  lastUsed: number;
 }
 
 export interface UserProfile {
@@ -172,6 +214,12 @@ export interface AppSettings {
   enableSeaDex: boolean;
   seaDexUrl: string;
   seaDexBestOnly: boolean;
+
+  enableTorrentio: boolean;
+  enableYts: boolean;
+  enableEztv: boolean;
+  enableSubsPlease: boolean;
+  enablePirateBay: boolean;
 
   enableJackett: boolean;
   jackettUrl: string;
@@ -217,3 +265,29 @@ export type ViewMode =
   | "downloads"
   | "settings"
   | "media-detail";
+
+export interface UserListProgressEntry {
+  media: MediaItem;
+  progress: number;
+  episodesCount: number;
+  nextEpisodeTitle?: string;
+  thumbnail?: string;
+}
+
+export interface AiringScheduleItem {
+  id: number;
+  airingAt: number;
+  episode: number;
+  mediaId: number;
+  tmdbId?: number;
+  mediaTitle: string;
+  mediaType?: MediaType;
+  coverImage: string;
+  bannerImage?: string;
+  dayOfMonth: number;
+  dayOfWeek: number;
+  dateKey: string;
+  isUserTracked?: boolean;
+  isWatched?: boolean;
+}
+

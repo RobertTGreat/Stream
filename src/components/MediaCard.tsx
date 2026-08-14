@@ -1,10 +1,11 @@
-import { useState } from "react";
+import { useState, useRef, useEffect, memo } from "react";
 import { Play, Star, Plus, Heart, Bookmark, CheckCircle2 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { MediaItem } from "../types";
-import { Tooltip } from "./Tooltip";
 import { MediaImage } from "./MediaImage";
 import { StorageService } from "../services/storage";
+import { AniListService } from "../services/anilist";
+import { TMDBService } from "../services/tmdb";
 
 interface MediaCardProps {
   item: MediaItem;
@@ -12,6 +13,9 @@ interface MediaCardProps {
   onPlay?: (item: MediaItem) => void;
   isFavorite?: boolean;
   onToggleFavorite?: (id: string) => void;
+  inWatchlist?: boolean;
+  onToggleWatchlist?: (id: string) => void;
+  isWatched?: boolean;
   onContextMenu?: (e: React.MouseEvent, item: MediaItem) => void;
   /** Stagger index for entrance (Continue-style spring). */
   index?: number;
@@ -19,22 +23,53 @@ interface MediaCardProps {
   animated?: boolean;
 }
 
-export function MediaCard({
+function MediaCardBase({
   item,
   onSelect,
   onPlay,
   isFavorite: isFavProp,
   onToggleFavorite,
+  inWatchlist: inWatchlistProp,
+  onToggleWatchlist,
+  isWatched: isWatchedProp,
   onContextMenu,
   index = 0,
   animated = true,
 }: MediaCardProps) {
   const [showQuickMenu, setShowQuickMenu] = useState(false);
-  const [isFavState, setIsFavState] = useState(() => isFavProp ?? StorageService.isFavorite(item.id));
-  const [inWatchlist, setInWatchlist] = useState(() => StorageService.isInWatchlist(item.id));
-  const [isWatched, setIsWatched] = useState(() =>
-    StorageService.getWatchProgress().some((h) => h.mediaId === item.id && h.completed)
-  );
+  const [localFav, setLocalFav] = useState<boolean | null>(null);
+  const [localWatchlist, setLocalWatchlist] = useState<boolean | null>(null);
+  const [localWatched, setLocalWatched] = useState<boolean | null>(null);
+  const prefetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const isFavState = localFav !== null ? localFav : (isFavProp ?? StorageService.isFavorite(item.id));
+  const inWatchlist = localWatchlist !== null ? localWatchlist : (inWatchlistProp ?? StorageService.isInWatchlist(item.id));
+  const isWatched = localWatched !== null ? localWatched : (isWatchedProp ?? StorageService.isWatchedFast(item.id));
+
+  useEffect(() => {
+    return () => {
+      if (prefetchTimerRef.current) clearTimeout(prefetchTimerRef.current);
+    };
+  }, []);
+
+  const handleMouseEnter = () => {
+    prefetchTimerRef.current = setTimeout(() => {
+      StorageService.cacheMedia(item);
+      if (item.mediaType === "anime" && item.anilistId) {
+        void AniListService.getAnimeDetail(item.anilistId).catch(() => undefined);
+      } else if (item.tmdbId) {
+        void TMDBService.getMediaDetail(item.tmdbId, item.mediaType).catch(() => undefined);
+      }
+    }, 120);
+  };
+
+  const handleMouseLeave = () => {
+    setShowQuickMenu(false);
+    if (prefetchTimerRef.current) {
+      clearTimeout(prefetchTimerRef.current);
+      prefetchTimerRef.current = null;
+    }
+  };
 
   const formatBadge =
     item.format ||
@@ -42,38 +77,34 @@ export function MediaCard({
 
   const handleToggleFav = (e: React.MouseEvent) => {
     e.stopPropagation();
+    StorageService.cacheMedia(item);
     if (onToggleFavorite) {
       onToggleFavorite(item.id);
     } else {
       StorageService.toggleFavorite(item.id);
     }
-    setIsFavState((prev) => !prev);
+    setLocalFav(!isFavState);
   };
 
   const handleToggleWatchlist = (e: React.MouseEvent) => {
     e.stopPropagation();
-    StorageService.toggleWatchlist(item.id);
-    setInWatchlist((prev) => !prev);
+    StorageService.cacheMedia(item);
+    if (onToggleWatchlist) {
+      onToggleWatchlist(item.id);
+    } else {
+      StorageService.toggleWatchlist(item.id);
+    }
+    setLocalWatchlist(!inWatchlist);
   };
 
   const handleToggleWatched = (e: React.MouseEvent) => {
     e.stopPropagation();
     if (isWatched) {
-      StorageService.removeWatchProgress(item.id);
-      setIsWatched(false);
+      StorageService.removeSeriesProgress(item.id);
+      setLocalWatched(false);
     } else {
-      StorageService.saveWatchProgress({
-        mediaId: item.id,
-        mediaTitle: item.title,
-        mediaType: item.mediaType,
-        coverImage: item.coverImage,
-        episodeNumber: 1,
-        progressSeconds: 1200,
-        totalDurationSeconds: 1200,
-        completed: true,
-        lastUpdated: Date.now(),
-      });
-      setIsWatched(true);
+      StorageService.markSeriesWatched(item);
+      setLocalWatched(true);
     }
   };
 
@@ -90,7 +121,8 @@ export function MediaCard({
       className="media-card"
       onClick={() => onSelect(item)}
       onContextMenu={handleRightClick}
-      onMouseLeave={() => setShowQuickMenu(false)}
+      onMouseEnter={handleMouseEnter}
+      onMouseLeave={handleMouseLeave}
       initial={animated ? { opacity: 0, y: 8 } : false}
       animate={animated ? { opacity: 1, y: 0 } : undefined}
       transition={
@@ -213,3 +245,6 @@ export function MediaCard({
     </motion.div>
   );
 }
+
+export const MediaCard = memo(MediaCardBase);
+

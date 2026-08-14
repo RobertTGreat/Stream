@@ -1,4 +1,5 @@
 import { PreferredQuality, TorrentResult } from "../types";
+import { isValidMagnet, looksLikeEpisodeRelease } from "./playback";
 
 const QUALITY_ORDER: Record<string, number> = {
   "2160p": 4,
@@ -34,15 +35,17 @@ function preferredTier(pref: PreferredQuality): number {
 export function scoreTorrent(
   t: TorrentResult,
   preferredQuality: PreferredQuality,
-  minSeeders: number
+  minSeeders: number,
+  episode?: number
 ): number {
-  if (minSeeders > 0 && t.seeders < minSeeders) return -1;
+  if (!isValidMagnet(t.magnet_url)) return -1;
+  if (minSeeders > 0 && t.seeders < minSeeders && !t.is_best_release) return -1;
 
   let score = 0;
 
-  // SeaDex / marked best releases jump the queue
-  if (t.is_best_release) score += 10_000;
-  if ((t.source_name || "").toLowerCase().includes("seadex")) score += 2_000;
+  if (t.is_best_release) score += 2_400;
+  if ((t.source_name || "").toLowerCase().includes("seadex")) score += 1_200;
+  if (looksLikeEpisodeRelease(t.title, episode)) score += 1_600;
 
   // Seeders (log-ish to avoid huge packs dominating purely by seed count)
   score += Math.min(t.seeders, 500) * 12;
@@ -80,7 +83,8 @@ export function scoreTorrent(
 export function selectBestTorrent(
   torrents: TorrentResult[],
   preferredQuality: PreferredQuality = "1080p",
-  minSeeders = 1
+  minSeeders = 1,
+  episode?: number
 ): TorrentResult | null {
   if (!torrents.length) return null;
 
@@ -88,8 +92,7 @@ export function selectBestTorrent(
   let bestScore = -Infinity;
 
   for (const t of torrents) {
-    if (!t.magnet_url) continue;
-    const s = scoreTorrent(t, preferredQuality, minSeeders);
+    const s = scoreTorrent(t, preferredQuality, minSeeders, episode);
     if (s < 0) continue;
     if (s > bestScore) {
       bestScore = s;
@@ -97,9 +100,8 @@ export function selectBestTorrent(
     }
   }
 
-  // Soft fallback: if minSeeders filtered everything, retry with 0
   if (!best && minSeeders > 0) {
-    return selectBestTorrent(torrents, preferredQuality, 0);
+    return selectBestTorrent(torrents, preferredQuality, 0, episode);
   }
 
   return best;

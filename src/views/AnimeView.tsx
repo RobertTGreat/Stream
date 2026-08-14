@@ -1,40 +1,58 @@
 import { useState, useRef, useEffect } from "react";
-import { Search, RefreshCw } from "lucide-react";
+import { Search, Flame, TrendingUp, Star, Sparkles } from "lucide-react";
 import { MediaItem } from "../types";
 import { MediaCard } from "../components/MediaCard";
 import { useFullRowsItems } from "../utils/useFullRowsItems";
+import { SkeletonGrid } from "../components/Skeleton";
 
 interface AnimeViewProps {
   items: MediaItem[];
   isLoading: boolean;
+  error?: string | null;
   onSelectMedia: (media: MediaItem) => void;
   onPlayMedia: (media: MediaItem) => void;
   favorites: string[];
   onToggleFavorite: (id: string) => void;
-  onSearch: (query: string, genre?: string) => void;
+  onToggleWatchlist?: (id: string) => void;
+  onSearch: (query: string, genre?: string, sort?: string) => void;
   onContextMenu?: (e: React.MouseEvent, media: MediaItem) => void;
 }
 
 const GENRES = ["All", "Action", "Adventure", "Drama", "Fantasy", "Mystery", "Sci-Fi", "Supernatural"];
 
+const SORT_OPTIONS: { id: "TRENDING_DESC" | "POPULARITY_DESC" | "SCORE_DESC" | "START_DATE_DESC"; label: string; icon: any }[] = [
+  { id: "TRENDING_DESC", label: "Trending", icon: Flame },
+  { id: "POPULARITY_DESC", label: "Popular", icon: TrendingUp },
+  { id: "SCORE_DESC", label: "Top Rated", icon: Star },
+  { id: "START_DATE_DESC", label: "Newest", icon: Sparkles },
+];
+
 export function AnimeView({
   items,
   isLoading,
+  error,
   onSelectMedia,
   onPlayMedia,
   favorites,
   onToggleFavorite,
+  onToggleWatchlist,
   onSearch,
   onContextMenu,
 }: AnimeViewProps) {
   const [selectedGenre, setSelectedGenre] = useState("All");
+  const [selectedSort, setSelectedSort] = useState<"TRENDING_DESC" | "POPULARITY_DESC" | "SCORE_DESC" | "START_DATE_DESC">("TRENDING_DESC");
   const [searchQuery, setSearchQuery] = useState("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { containerRef, displayItems } = useFullRowsItems(items, 170, 16);
 
   const handleGenreClick = (genre: string) => {
     setSelectedGenre(genre);
-    onSearch(searchQuery, genre === "All" ? undefined : genre);
+    onSearch(searchQuery, genre === "All" ? undefined : genre, selectedSort);
+  };
+
+  const handleSortClick = (sortId: "TRENDING_DESC" | "POPULARITY_DESC" | "SCORE_DESC" | "START_DATE_DESC") => {
+    setSelectedSort(sortId);
+    onSearch(searchQuery, selectedGenre === "All" ? undefined : selectedGenre, sortId);
   };
 
   const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -42,7 +60,7 @@ export function AnimeView({
     setSearchQuery(val);
     if (timerRef.current) clearTimeout(timerRef.current);
     timerRef.current = setTimeout(() => {
-      onSearch(val, selectedGenre === "All" ? undefined : selectedGenre);
+      onSearch(val, selectedGenre === "All" ? undefined : selectedGenre, selectedSort);
     }, 300);
   };
 
@@ -61,6 +79,23 @@ export function AnimeView({
         </div>
 
         <div className="filter-controls">
+          <div className="sort-pills-bar">
+            {SORT_OPTIONS.map((opt) => {
+              const Icon = opt.icon;
+              return (
+                <button
+                  key={opt.id}
+                  type="button"
+                  className={`sort-pill-btn ${selectedSort === opt.id ? "active" : ""}`}
+                  onClick={() => handleSortClick(opt.id)}
+                >
+                  <Icon size={12} />
+                  <span>{opt.label}</span>
+                </button>
+              );
+            })}
+          </div>
+
           <div className="search-field">
             <Search size={14} />
             <input
@@ -88,9 +123,14 @@ export function AnimeView({
       </div>
 
       {isLoading ? (
-        <div className="loading-state">
-          <RefreshCw size={24} className="spin-icon" />
-          <p>Fetching anime from AniList API...</p>
+        <SkeletonGrid count={18} />
+      ) : error ? (
+        <div className="empty-state">
+          <p>{error}</p>
+        </div>
+      ) : displayItems.length === 0 ? (
+        <div className="empty-state">
+          <p>No anime matched that search.</p>
         </div>
       ) : (
         <div ref={containerRef} className="catalog-grid">
@@ -103,6 +143,7 @@ export function AnimeView({
               onPlay={onPlayMedia}
               isFavorite={favorites.includes(item.id)}
               onToggleFavorite={onToggleFavorite}
+              onToggleWatchlist={onToggleWatchlist}
               onContextMenu={onContextMenu}
             />
           ))}

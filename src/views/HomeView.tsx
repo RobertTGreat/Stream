@@ -1,10 +1,11 @@
-import { useState, useEffect, useRef, useMemo, useCallback, type RefObject } from "react";
+import { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { motion } from "motion/react";
 import { Play, ChevronRight, ChevronLeft, Check } from "lucide-react";
-import { MediaItem, StreamProgress, Episode } from "../types";
+import { MediaItem, StreamProgress, Episode, MediaType } from "../types";
 import { HeroBanner } from "../components/HeroBanner";
 import { MediaCard } from "../components/MediaCard";
 import { AniListService, UserListProgressEntry, AiringScheduleItem } from "../services/anilist";
+import { TMDBService } from "../services/tmdb";
 import { StorageService } from "../services/storage";
 import { normalizeMediaTitle, getBackdropImageUrl } from "../utils/mediaImages";
 import { getRailScrollState, scrollRailByPage } from "../utils/scrollRail";
@@ -13,6 +14,8 @@ import { MediaImage } from "../components/MediaImage";
 type ContinueCard =
   | { kind: "local"; key: string; item: StreamProgress }
   | { kind: "anilist"; key: string; entry: UserListProgressEntry };
+
+type CalendarMediaFilter = "all" | "anime" | "tv" | "movie";
 
 interface HomeViewProps {
   spotlightMedia: MediaItem | null;
@@ -121,26 +124,30 @@ function CalendarDayCell({
       </div>
 
       <div className="hm-cal-list">
-        {cell.items.map((item, idx) => (
-          <button
-            type="button"
-            key={`sch_${item.id}_${item.mediaId}_${idx}`}
-            className={`hm-cal-item ${idx === activeIdx ? "is-active" : ""}`}
-            onMouseEnter={() => setHoverIdx(idx)}
-            onFocus={() => setHoverIdx(idx)}
-            onClick={(e) => {
-              e.stopPropagation();
-              onOpenShow(item);
-            }}
-            title={`${item.mediaTitle} — Ep. ${item.episode}`}
-          >
-            <span className="hm-cal-title">
-              {item.isWatched && <Check size={9} className="hm-cal-check" />}
-              <span className={item.isWatched ? "is-watched" : ""}>{item.mediaTitle}</span>
-            </span>
-            <span className="hm-cal-ep">{item.episode}</span>
-          </button>
-        ))}
+        {cell.items.map((item, idx) => {
+          const type = item.mediaType || "anime";
+          const badgeText = type === "movie" ? "Film" : type === "tv" ? `S·${item.episode}` : `${item.episode}`;
+          return (
+            <button
+              type="button"
+              key={`sch_${item.id}_${item.mediaId}_${idx}`}
+              className={`hm-cal-item ${idx === activeIdx ? "is-active" : ""} type-${type}`}
+              onMouseEnter={() => setHoverIdx(idx)}
+              onFocus={() => setHoverIdx(idx)}
+              onClick={(e) => {
+                e.stopPropagation();
+                onOpenShow(item);
+              }}
+              title={`${item.mediaTitle} ${type === "movie" ? "(Movie Release)" : `— Ep. ${item.episode}`}`}
+            >
+              <span className="hm-cal-title">
+                {item.isWatched && <Check size={9} className="hm-cal-check" />}
+                <span className={item.isWatched ? "is-watched" : ""}>{item.mediaTitle}</span>
+              </span>
+              <span className={`hm-cal-ep badge-${type}`}>{badgeText}</span>
+            </button>
+          );
+        })}
       </div>
     </div>
   );
@@ -174,6 +181,7 @@ interface CatalogRailProps {
   onPlayMedia: (media: MediaItem) => void;
   favorites: string[];
   onToggleFavorite?: (id: string) => void;
+  onToggleWatchlist?: (id: string) => void;
   onContextMenu?: (e: React.MouseEvent, media: MediaItem) => void;
 }
 
@@ -183,6 +191,7 @@ function CatalogRail({
   onPlayMedia,
   favorites,
   onToggleFavorite,
+  onToggleWatchlist,
   onContextMenu,
 }: CatalogRailProps) {
   const railRef = useRef<HTMLDivElement>(null);
@@ -219,7 +228,7 @@ function CatalogRail({
       <button
         type="button"
         className="hm-rail-nav is-left"
-        onClick={() => scrollRailByPage(railRef.current, -1)}
+        onClick={() => railRef.current && scrollRailByPage(railRef.current, -1)}
         aria-label="Scroll left"
         disabled={!scrollState.canLeft}
       >
@@ -229,7 +238,7 @@ function CatalogRail({
       <button
         type="button"
         className="hm-rail-nav is-right"
-        onClick={() => scrollRailByPage(railRef.current, 1)}
+        onClick={() => railRef.current && scrollRailByPage(railRef.current, 1)}
         aria-label="Scroll right"
         disabled={!scrollState.canRight}
       >
@@ -246,6 +255,7 @@ function CatalogRail({
               onPlay={onPlayMedia}
               isFavorite={favorites.includes(item.id)}
               onToggleFavorite={onToggleFavorite}
+              onToggleWatchlist={onToggleWatchlist}
               onContextMenu={onContextMenu ? (e, m) => onContextMenu(e, m) : undefined}
             />
           </div>
@@ -274,14 +284,21 @@ export function HomeView({
   const now = new Date();
   const [viewYear, setViewYear] = useState(now.getFullYear());
   const [viewMonth, setViewMonth] = useState(now.getMonth());
-  const [aniListUserWatching, setAniListUserWatching] = useState<UserListProgressEntry[]>([]);
-  const [airingSchedule, setAiringSchedule] = useState<AiringScheduleItem[]>([]);
+  const [calendarFilter, setCalendarFilter] = useState<CalendarMediaFilter>("all");
+  const [aniListUserWatching, setAniListUserWatching] = useState<UserListProgressEntry[]>(() =>
+    StorageService.getUserWatchingCache()
+  );
+  const [airingSchedule, setAiringSchedule] = useState<AiringScheduleItem[]>(() => {
+    const key = `stream_airing_${now.getFullYear()}_${now.getMonth()}_mine`;
+    return StorageService.getMonthlyAiringCache(key) || [];
+  });
   const [myListsOnly, setMyListsOnly] = useState(true);
-  const [scheduleLoading, setScheduleLoading] = useState(true);
+  const [scheduleLoading, setScheduleLoading] = useState(() => {
+    const key = `stream_airing_${now.getFullYear()}_${now.getMonth()}_mine`;
+    const cached = StorageService.getMonthlyAiringCache(key);
+    return !cached || cached.length === 0;
+  });
   const cwScrollRef = useRef<HTMLDivElement>(null);
-  const animeRailRef = useRef<HTMLDivElement>(null);
-  const movieRailRef = useRef<HTMLDivElement>(null);
-  const tvRailRef = useRef<HTMLDivElement>(null);
 
   const spotlightItems = useMemo(
     () => (trendingAnime.length > 0 ? trendingAnime.slice(0, 5) : trendingMovies.slice(0, 5)),
@@ -291,7 +308,7 @@ export function HomeView({
   useEffect(() => {
     let cancelled = false;
     AniListService.fetchUserCurrentWatching().then((entries) => {
-      if (!cancelled) {
+      if (!cancelled && entries && entries.length > 0) {
         setAniListUserWatching(entries);
         for (const e of entries) StorageService.cacheMedia(e.media);
       }
@@ -303,29 +320,59 @@ export function HomeView({
 
   useEffect(() => {
     let cancelled = false;
-    setScheduleLoading(true);
-    AniListService.fetchMonthlyAiringSchedule(viewYear, viewMonth, myListsOnly)
-      .then((schedule) => {
-        if (!cancelled) setAiringSchedule(schedule);
+    const cacheKey = `stream_airing_${viewYear}_${viewMonth}_${myListsOnly ? "mine" : "all"}`;
+    const cached = StorageService.getMonthlyAiringCache(cacheKey);
+    if (cached && cached.length > 0) {
+      setAiringSchedule(cached);
+      setScheduleLoading(false);
+    } else {
+      setScheduleLoading(true);
+    }
+
+    const promises: Promise<AiringScheduleItem[]>[] = [
+      AniListService.fetchMonthlyAiringSchedule(viewYear, viewMonth, myListsOnly).catch(() => []),
+    ];
+
+    if (!myListsOnly) {
+      promises.push(TMDBService.fetchMonthlyTVSchedule(viewYear, viewMonth).catch(() => []));
+      promises.push(TMDBService.fetchMonthlyMovieSchedule(viewYear, viewMonth).catch(() => []));
+    }
+
+    Promise.all(promises)
+      .then(([animeSchedule = [], tvSchedule = [], movieSchedule = []]) => {
+        if (!cancelled) {
+          const combined: AiringScheduleItem[] = [
+            ...animeSchedule.map((a) => ({ ...a, mediaType: a.mediaType || ("anime" as MediaType) })),
+            ...tvSchedule,
+            ...movieSchedule,
+          ];
+          setAiringSchedule(combined);
+        }
       })
       .finally(() => {
         if (!cancelled) setScheduleLoading(false);
       });
+
     return () => {
       cancelled = true;
     };
-  }, [viewYear, viewMonth, myListsOnly]);
+  }, [viewYear, viewMonth, myListsOnly, calendarFilter]);
+
+  const filteredSchedule = useMemo(() => {
+    if (calendarFilter === "all") return airingSchedule;
+    return airingSchedule.filter((item) => (item.mediaType || "anime") === calendarFilter);
+  }, [airingSchedule, calendarFilter]);
 
   const scheduleByDate = useMemo(() => {
     const map = new Map<string, AiringScheduleItem[]>();
-    for (const item of airingSchedule) {
+    for (const item of filteredSchedule) {
       const key = item.dateKey || `${viewYear}-${viewMonth + 1}-${item.dayOfMonth}`;
       const list = map.get(key) || [];
       list.push(item);
       map.set(key, list);
     }
     return map;
-  }, [airingSchedule, viewYear, viewMonth]);
+  }, [filteredSchedule, viewYear, viewMonth]);
 
   const calendarCells = useMemo(
     () => buildMonthCells(viewYear, viewMonth, scheduleByDate),
@@ -340,11 +387,14 @@ export function HomeView({
 
   const openScheduleShow = useCallback(
     (item: AiringScheduleItem) => {
+      const type = item.mediaType || "anime";
+      const isTmdb = type === "tv" || type === "movie";
       const media: MediaItem = {
-        id: `ani_${item.mediaId}`,
-        anilistId: item.mediaId,
+        id: isTmdb ? `tmdb_${type}_${item.mediaId}` : `ani_${item.mediaId}`,
+        anilistId: !isTmdb ? item.mediaId : undefined,
+        tmdbId: isTmdb ? item.tmdbId || item.mediaId : undefined,
         title: item.mediaTitle,
-        mediaType: "anime",
+        mediaType: type,
         coverImage: item.coverImage,
         bannerImage: item.bannerImage,
         synopsis: "",
@@ -391,7 +441,7 @@ export function HomeView({
     const localByMedia = new Map<string, StreamProgress>();
     for (const item of continueWatching) {
       const existing = localByMedia.get(item.mediaId);
-      if (!existing || item.lastUpdated > existing.lastUpdated) {
+      if (!existing || (item.lastUpdated || 0) > (existing.lastUpdated || 0)) {
         localByMedia.set(item.mediaId, item);
       }
     }
@@ -400,29 +450,37 @@ export function HomeView({
 
     const locals = Array.from(localByMedia.values());
     for (const item of locals) {
+      if (dismissed.has(item.mediaId)) continue;
+
       const mediaCache = StorageService.getMediaCache();
       const cached = mediaCache[item.mediaId];
       const isMovie = item.mediaType === "movie" || cached?.mediaType === "movie" || cached?.episodesCount === 1;
-
       const done = item.completed || item.percentage >= 90;
       const totalEps = cached?.episodesCount || (isMovie ? 1 : 0);
       const nextEp = item.episodeNumber + 1;
       const nextAiring = cached?.nextAiringEpisode;
       const sch = item.anilistId ? latestAiringMap.get(item.anilistId) : undefined;
-      const nowSec = Math.floor(Date.now() / 1000);
 
+      // 1. If it's a movie and it's already completed, do NOT show in Continue Watching
+      if (isMovie && done) {
+        continue;
+      }
+
+      // 2. If it's a series and the current episode is done, verify that a released next episode exists
       let isNextReleased = true;
       if (isMovie) {
         isNextReleased = false;
       } else if (totalEps > 0 && nextEp > totalEps) {
         isNextReleased = false;
-      } else if (nextAiring && nextAiring.episode === nextEp && nextAiring.airingAt > nowSec) {
+      } else if (nextAiring && nextAiring.episode === nextEp && nextAiring.timeUntilAiring > 0) {
         isNextReleased = false;
       } else if (sch && sch.episode < nextEp) {
         isNextReleased = false;
+      } else if (cached?.status === "NOT_YET_RELEASED") {
+        isNextReleased = false;
       }
 
-      // If completed and no next episode available/released, EXCLUDE from Continue
+      // If finished current episode and no next released episode is available, skip
       if (done && !isNextReleased) {
         continue;
       }
@@ -430,45 +488,47 @@ export function HomeView({
       if (!claim(item.mediaId, item.anilistId, item.mediaTitle)) continue;
 
       const hasNewEp = (done && isNextReleased) || (!!sch && sch.episode > item.episodeNumber);
+      const sortTime = (item.lastUpdated || Date.now()) + (hasNewEp ? 1e11 : 0);
 
-      const sortTime = (item.lastUpdated || 0) + (hasNewEp ? 1e11 : 0);
       itemsWithRank.push({
         card: { kind: "local", key: `local_${item.mediaId}`, item },
         sortTime,
       });
     }
 
-    // AniList watching — sort by recent activity / new episode out
+    // AniList watching — only show shows with an available, released next episode or active progress
     for (const entry of aniListUserWatching) {
+      if (dismissed.has(entry.media.id)) continue;
+
       const rawId = entry.media.anilistId || (entry.media.id.startsWith("ani_") ? parseInt(entry.media.id.replace("ani_", ""), 10) : undefined);
       const sch = rawId ? latestAiringMap.get(rawId) : undefined;
       const totalEps = entry.episodesCount || entry.media.episodesCount || 0;
       const nextEp = entry.progress + 1;
       const nextAiring = entry.media.nextAiringEpisode;
-      const isMovie = entry.media.mediaType === "movie" || totalEps === 1;
-      const nowSec = Math.floor(Date.now() / 1000);
 
+      // Exclude completed movies or series where user watched all episodes
+      if (entry.media.mediaType === "movie" && entry.progress >= 1) continue;
+      if (totalEps > 0 && entry.progress >= totalEps) continue;
+
+      // Check if next episode is actually released
       let isNextReleased = true;
-      if (isMovie) {
+      if (totalEps > 0 && nextEp > totalEps) {
         isNextReleased = false;
-      } else if (totalEps > 0 && nextEp > totalEps) {
+      } else if (nextAiring && nextAiring.episode === nextEp && nextAiring.timeUntilAiring > 0) {
         isNextReleased = false;
-      } else if (nextAiring && nextAiring.episode === nextEp && nextAiring.airingAt > nowSec) {
+      } else if (entry.media.status === "NOT_YET_RELEASED") {
         isNextReleased = false;
       } else if (sch && sch.episode < nextEp) {
         isNextReleased = false;
       }
 
-      // If caught up and next episode is not out yet, EXCLUDE from Continue
-      if (!isNextReleased) {
-        continue;
-      }
+      // If next episode is unreleased/not yet aired, do not show in Continue Watching
+      if (!isNextReleased) continue;
 
       if (!claim(entry.media.id, entry.media.anilistId, entry.media.title)) continue;
 
       const hasNewEp = !!sch && sch.episode > entry.progress;
-
-      let baseTime = Date.now() - 1000 * 60 * 60 * 24 * 60;
+      let baseTime = Date.now() - 1000 * 60 * 60 * 24 * 7;
       if (sch) {
         baseTime = sch.airingAt * 1000;
       }
@@ -480,39 +540,19 @@ export function HomeView({
       });
     }
 
-    // Order by Recently Watched & New Episode Out (descending sortTime)
+    // Order by sortTime (descending)
     itemsWithRank.sort((a, b) => b.sortTime - a.sortTime);
 
     return itemsWithRank.map((entry) => entry.card);
   }, [continueWatching, aniListUserWatching, continueDismissed, airingSchedule]);
 
-  const mediaFromProgress = (item: StreamProgress): MediaItem => ({
-    id: item.mediaId,
-    title: item.mediaTitle,
-    mediaType: item.mediaType,
-    coverImage: item.coverImage,
-    synopsis: "",
-    genres: [],
-    anilistId: item.anilistId,
-  });
-
-  const openContinueContext = (
-    e: React.MouseEvent,
-    media: MediaItem,
-    progress?: StreamProgress,
-    epNum?: number
-  ) => {
-    if (!onContextMenu) return;
-    onContextMenu(e, media, epNum
-      ? { id: `ep_cw_${media.id}_${epNum}`, episodeNumber: epNum, title: `Episode ${epNum}` }
-      : undefined, { fromContinue: true, progress });
-  };
-
   const totalCwCardsCount = continueCards.length;
   const [cwScroll, setCwScroll] = useState({ canLeft: false, canRight: false });
 
   const refreshCwScroll = useCallback(() => {
-    setCwScroll(getRailScrollState(cwScrollRef.current));
+    if (cwScrollRef.current) {
+      setCwScroll(getRailScrollState(cwScrollRef.current));
+    }
   }, []);
 
   useEffect(() => {
@@ -526,7 +566,6 @@ export function HomeView({
     const ro = typeof ResizeObserver !== "undefined" ? new ResizeObserver(() => refreshCwScroll()) : null;
     ro?.observe(el);
 
-    // After cards mount / images load
     const t = window.setTimeout(refreshCwScroll, 80);
     return () => {
       el.removeEventListener("scroll", onScroll);
@@ -534,13 +573,6 @@ export function HomeView({
       window.clearTimeout(t);
     };
   }, [continueCards.length, refreshCwScroll]);
-
-  /** Catalog rails — eased page scroll */
-  const scrollRail = (ref: RefObject<HTMLDivElement | null>, dir: 1 | -1) => {
-    const el = ref.current;
-    if (!el) return;
-    void scrollRailByPage(el, dir, ".hm-poster-slot, .media-card, .hm-cw-card");
-  };
 
   /** Continue — smooth continuous glide (can re-click mid-scroll to re-aim) */
   const scrollContinue = async (dir: 1 | -1) => {
@@ -723,11 +755,21 @@ export function HomeView({
 
                   let isNextReleased = true;
                   if (totalEps > 0 && nextEp > totalEps) isNextReleased = false;
-                  if (nextAiring && nextAiring.episode === nextEp) isNextReleased = false;
+                  if (nextAiring && nextAiring.episode === nextEp && nextAiring.timeUntilAiring > 0) isNextReleased = false;
 
-                  const subText = isNextReleased
-                    ? `Up next · Ep ${nextEp}${totalEps ? ` / ${totalEps}` : ""}`
-                    : `Completed · Ep ${entry.progress}`;
+                  let subText = "";
+                  if (entry.media.mediaType === "movie" || totalEps === 1) {
+                    subText = entry.progress >= 1 ? "Completed" : "Movie";
+                  } else if (totalEps > 0 && entry.progress >= totalEps) {
+                    subText = `Completed · Ep ${entry.progress} / ${totalEps}`;
+                  } else if (isNextReleased) {
+                    subText = `Up next · Ep ${nextEp}${totalEps ? ` / ${totalEps}` : ""}`;
+                  } else if (nextAiring && nextAiring.timeUntilAiring > 0) {
+                    const days = Math.ceil(nextAiring.timeUntilAiring / 86400);
+                    subText = `Ep ${entry.progress} · Ep ${nextEp} in ${days}d`;
+                  } else {
+                    subText = `Caught up · Ep ${entry.progress}${totalEps ? ` / ${totalEps}` : ""}`;
+                  }
 
                   const backdropUrl = entry.media.bannerImage || getBackdropImageUrl(entry.media);
 
@@ -807,7 +849,39 @@ export function HomeView({
         {/* Schedule */}
         <section className="hm-section hm-section-calendar">
           <div className="hm-section-head hm-cal-head">
-            <h2 className="hm-section-label">Schedule</h2>
+            <div className="hm-cal-head-left">
+              <h2 className="hm-section-label">Schedule</h2>
+              <div className="hm-cal-filter-tabs">
+                <button
+                  type="button"
+                  className={`hm-cal-tab ${calendarFilter === "all" ? "active" : ""}`}
+                  onClick={() => setCalendarFilter("all")}
+                >
+                  All
+                </button>
+                <button
+                  type="button"
+                  className={`hm-cal-tab ${calendarFilter === "anime" ? "active" : ""}`}
+                  onClick={() => setCalendarFilter("anime")}
+                >
+                  Anime
+                </button>
+                <button
+                  type="button"
+                  className={`hm-cal-tab ${calendarFilter === "tv" ? "active" : ""}`}
+                  onClick={() => setCalendarFilter("tv")}
+                >
+                  TV Series
+                </button>
+                <button
+                  type="button"
+                  className={`hm-cal-tab ${calendarFilter === "movie" ? "active" : ""}`}
+                  onClick={() => setCalendarFilter("movie")}
+                >
+                  Movies
+                </button>
+              </div>
+            </div>
             <div className="hm-cal-controls">
               <button type="button" className="hm-chip" onClick={() => setMyListsOnly((p) => !p)}>
                 {myListsOnly ? "My list" : "All airing"}
@@ -866,6 +940,7 @@ export function HomeView({
             onPlayMedia={onPlayMedia}
             favorites={favorites}
             onToggleFavorite={onToggleFavorite}
+            onToggleWatchlist={onToggleWatchlist}
             onContextMenu={onContextMenu}
           />
         </section>
@@ -878,6 +953,7 @@ export function HomeView({
             onPlayMedia={onPlayMedia}
             favorites={favorites}
             onToggleFavorite={onToggleFavorite}
+            onToggleWatchlist={onToggleWatchlist}
             onContextMenu={onContextMenu}
           />
         </section>
@@ -890,6 +966,7 @@ export function HomeView({
             onPlayMedia={onPlayMedia}
             favorites={favorites}
             onToggleFavorite={onToggleFavorite}
+            onToggleWatchlist={onToggleWatchlist}
             onContextMenu={onContextMenu}
           />
         </section>

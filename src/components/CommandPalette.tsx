@@ -16,10 +16,12 @@ import {
   Key,
   FolderOpen,
   Palette,
+  Clock,
 } from "lucide-react";
 import { MediaItem, ViewMode } from "../types";
 import { AniListService } from "../services/anilist";
 import { TMDBService } from "../services/tmdb";
+import { StorageService } from "../services/storage";
 import { MediaImage } from "./MediaImage";
 
 interface CommandPaletteProps {
@@ -134,6 +136,14 @@ const SETTINGS_ENTRIES: Omit<SettingsCommand, "type">[] = [
     sectionId: "settings-easy-watch",
   },
   {
+    id: "set_playback",
+    title: "Playback",
+    subtitle: "Auto-play next, hardware decode, subtitles",
+    icon: Zap,
+    keywords: ["playback", "autoplay", "next", "hwdec", "subtitles", "hardware"],
+    sectionId: "settings-playback",
+  },
+  {
     id: "set_indexers",
     title: "Torrent Indexers",
     subtitle: "Nyaa, AnimeTosho, SeaDex, Jackett, Prowlarr",
@@ -168,6 +178,7 @@ export function CommandPalette({
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [searchResults, setSearchResults] = useState<MediaItem[]>([]);
+  const [recentSearches, setRecentSearches] = useState<string[]>([]);
   const [isSearching, setIsSearching] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
   const q = query.trim();
@@ -219,6 +230,7 @@ export function CommandPalette({
       setQuery("");
       setSelectedIndex(0);
       setSearchResults([]);
+      setRecentSearches(StorageService.getRecentSearches());
       setTimeout(() => inputRef.current?.focus(), 40);
     }
   }, [isOpen]);
@@ -296,6 +308,7 @@ export function CommandPalette({
         if (selected.type === "action") selected.action();
         else if (selected.type === "settings") openSettings(selected.sectionId);
         else if (selected.type === "media") {
+          StorageService.addRecentSearch(selected.item.title);
           onSelectMedia(selected.item);
           onClose();
         }
@@ -357,37 +370,75 @@ export function CommandPalette({
             </div>
 
             {!hasQuery && (
-              <motion.div
-                className="cp-actions"
-                initial="hidden"
-                animate="show"
-                variants={{
-                  hidden: {},
-                  show: { transition: { staggerChildren: 0.03 } },
-                }}
-              >
-                {filteredActions.map((item, idx) => {
-                  const Icon = item.icon;
-                  return (
-                    <motion.button
-                      key={item.id}
-                      type="button"
-                      className={`cp-action ${idx === selectedIndex ? "is-selected" : ""}`}
-                      onClick={() => item.action()}
-                      onMouseEnter={() => setSelectedIndex(idx)}
-                      variants={{
-                        hidden: { opacity: 0, y: 6 },
-                        show: { opacity: 1, y: 0 },
-                      }}
-                      whileHover={{ scale: 1.04 }}
-                      whileTap={{ scale: 0.97 }}
-                    >
-                      <Icon size={15} />
-                      <span>{item.title}</span>
-                    </motion.button>
-                  );
-                })}
-              </motion.div>
+              <>
+                {recentSearches.length > 0 && (
+                  <div className="cp-recent-searches">
+                    <div className="cp-recent-header">
+                      <span className="cp-recent-title flex items-center gap-1.5 text-xs text-zinc-400">
+                        <Clock size={12} />
+                        Recent Searches
+                      </span>
+                      <button
+                        type="button"
+                        className="cp-recent-clear-btn"
+                        onClick={() => {
+                          StorageService.clearRecentSearches();
+                          setRecentSearches([]);
+                        }}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                    <div className="cp-recent-chips">
+                      {recentSearches.map((term) => (
+                        <button
+                          key={term}
+                          type="button"
+                          className="cp-recent-chip"
+                          onClick={() => {
+                            setQuery(term);
+                            StorageService.addRecentSearch(term);
+                          }}
+                        >
+                          <span>{term}</span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
+                <motion.div
+                  className="cp-actions"
+                  initial="hidden"
+                  animate="show"
+                  variants={{
+                    hidden: {},
+                    show: { transition: { staggerChildren: 0.03 } },
+                  }}
+                >
+                  {filteredActions.map((item, idx) => {
+                    const Icon = item.icon;
+                    return (
+                      <motion.button
+                        key={item.id}
+                        type="button"
+                        className={`cp-action ${idx === selectedIndex ? "is-selected" : ""}`}
+                        onClick={() => item.action()}
+                        onMouseEnter={() => setSelectedIndex(idx)}
+                        variants={{
+                          hidden: { opacity: 0, y: 6 },
+                          show: { opacity: 1, y: 0 },
+                        }}
+                        whileHover={{ scale: 1.04 }}
+                        whileTap={{ scale: 0.97 }}
+                      >
+                        <Icon size={15} />
+                        <span>{item.title}</span>
+                      </motion.button>
+                    );
+                  })}
+                </motion.div>
+              </>
             )}
 
             {hasQuery && (
@@ -444,6 +495,7 @@ export function CommandPalette({
                             type="button"
                             className={`cp-card ${isSelected ? "is-selected" : ""}`}
                             onClick={() => {
+                              StorageService.addRecentSearch(item.title);
                               onSelectMedia(item);
                               onClose();
                             }}

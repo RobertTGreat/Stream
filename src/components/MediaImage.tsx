@@ -22,6 +22,7 @@ export function MediaImage({
   emptyLabel = "No thumbnail",
 }: MediaImageProps) {
   const [failed, setFailed] = useState(false);
+  const [loaded, setLoaded] = useState(false);
   const hasSrc = Boolean(src && src.trim() && !failed);
 
   if (!hasSrc) {
@@ -37,8 +38,10 @@ export function MediaImage({
     <img
       src={src!}
       alt={alt}
-      className={className}
+      className={`media-img-fade ${loaded ? "media-img-loaded" : "media-img-loading"} ${className}`.trim()}
       loading={loading}
+      decoding="async"
+      onLoad={() => setLoaded(true)}
       onError={() => setFailed(true)}
     />
   );

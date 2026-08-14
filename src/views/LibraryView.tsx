@@ -1,26 +1,55 @@
-import { useState } from "react";
-import { RefreshCw, LayoutGrid, List, Play, FileVideo, HardDrive } from "lucide-react";
+import { useState, useMemo } from "react";
+import { RefreshCw, LayoutGrid, List, Play, FileVideo, HardDrive, Search, FolderOpen, ArrowUpDown } from "lucide-react";
 import { LocalMediaItem, MediaType } from "../types";
+import { selectDirectory } from "../services/tauri";
 
 interface LibraryViewProps {
   localItems: LocalMediaItem[];
   isScanning: boolean;
-  onScanFolder: (mediaType: MediaType) => void;
+  scanError?: string | null;
+  onScanFolder: (mediaType: MediaType, customPath?: string) => void;
   onPlayLocalItem: (item: LocalMediaItem) => void;
 }
 
 export function LibraryView({
   localItems,
   isScanning,
+  scanError,
   onScanFolder,
   onPlayLocalItem,
 }: LibraryViewProps) {
   const [selectedType, setSelectedType] = useState<MediaType | "all">("all");
   const [viewStyle, setViewStyle] = useState<"grid" | "table">("grid");
+  const [searchQuery, setSearchQuery] = useState("");
+  const [sortBy, setSortBy] = useState<"name" | "size" | "episode">("name");
 
-  const filteredItems = localItems.filter((item) =>
-    selectedType === "all" ? true : item.media_type === selectedType
-  );
+  const handlePickAndScan = async () => {
+    const folder = await selectDirectory("Select Media Directory to Scan");
+    if (folder) {
+      onScanFolder(selectedType === "all" ? "anime" : selectedType, folder);
+    }
+  };
+
+  const filteredItems = useMemo(() => {
+    let items = localItems.filter((item) => {
+      const matchesType = selectedType === "all" || item.media_type === selectedType;
+      const matchesSearch =
+        !searchQuery.trim() ||
+        item.parsed_title.toLowerCase().includes(searchQuery.trim().toLowerCase()) ||
+        item.filename.toLowerCase().includes(searchQuery.trim().toLowerCase());
+      return matchesType && matchesSearch;
+    });
+
+    if (sortBy === "name") {
+      items.sort((a, b) => a.parsed_title.localeCompare(b.parsed_title));
+    } else if (sortBy === "size") {
+      items.sort((a, b) => b.size_bytes - a.size_bytes);
+    } else if (sortBy === "episode") {
+      items.sort((a, b) => (a.season || 0) - (b.season || 0) || (a.episode || 0) - (b.episode || 0));
+    }
+
+    return items;
+  }, [localItems, selectedType, searchQuery, sortBy]);
 
   const formatSize = (bytes: number) => {
     const gb = bytes / (1024 * 1024 * 1024);
@@ -33,37 +62,40 @@ export function LibraryView({
       <div className="catalog-header">
         <div className="title-area">
           <h1>Local Library</h1>
-          <p className="subtitle">Scanned media files from local drive folders</p>
+          <p className="subtitle">Scanned video files and release folders from your local drives</p>
         </div>
 
         <div className="filter-controls">
+          <div className="search-field">
+            <Search size={14} />
+            <input
+              type="text"
+              placeholder="Search local library..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="catalog-input"
+            />
+          </div>
+
           <div className="scan-actions flex gap-2">
             <button
               type="button"
               className="btn-secondary"
-              onClick={() => onScanFolder("anime")}
+              onClick={handlePickAndScan}
               disabled={isScanning}
+              title="Pick a custom folder to scan"
             >
-              <RefreshCw size={13} className={isScanning ? "spin-icon" : ""} />
-              <span>Scan Anime</span>
+              <FolderOpen size={13} />
+              <span>Browse & Scan</span>
             </button>
             <button
               type="button"
               className="btn-secondary"
-              onClick={() => onScanFolder("movie")}
+              onClick={() => onScanFolder(selectedType === "all" ? "anime" : selectedType)}
               disabled={isScanning}
             >
               <RefreshCw size={13} className={isScanning ? "spin-icon" : ""} />
-              <span>Scan Movies</span>
-            </button>
-            <button
-              type="button"
-              className="btn-secondary"
-              onClick={() => onScanFolder("tv")}
-              disabled={isScanning}
-            >
-              <RefreshCw size={13} className={isScanning ? "spin-icon" : ""} />
-              <span>Scan TV</span>
+              <span>Rescan</span>
             </button>
           </div>
 
@@ -86,24 +118,59 @@ export function LibraryView({
         </div>
       </div>
 
-      <div className="genre-pills-bar">
-        {(["all", "anime", "movie", "tv"] as const).map((type) => (
+      <div className="catalog-filter-bar flex items-center justify-between gap-4">
+        <div className="genre-pills-bar">
+          {(["all", "anime", "movie", "tv"] as const).map((type) => (
+            <button
+              key={type}
+              type="button"
+              className={`genre-pill-btn ${selectedType === type ? "active" : ""}`}
+              onClick={() => setSelectedType(type)}
+            >
+              {type.toUpperCase()}
+            </button>
+          ))}
+        </div>
+
+        <div className="sort-pills-bar">
           <button
-            key={type}
             type="button"
-            className={`genre-pill-btn ${selectedType === type ? "active" : ""}`}
-            onClick={() => setSelectedType(type)}
+            className={`sort-pill-btn ${sortBy === "name" ? "active" : ""}`}
+            onClick={() => setSortBy("name")}
           >
-            {type.toUpperCase()}
+            <ArrowUpDown size={11} />
+            <span>Name (A-Z)</span>
           </button>
-        ))}
+          <button
+            type="button"
+            className={`sort-pill-btn ${sortBy === "size" ? "active" : ""}`}
+            onClick={() => setSortBy("size")}
+          >
+            <ArrowUpDown size={11} />
+            <span>Size (Largest)</span>
+          </button>
+          <button
+            type="button"
+            className={`sort-pill-btn ${sortBy === "episode" ? "active" : ""}`}
+            onClick={() => setSortBy("episode")}
+          >
+            <ArrowUpDown size={11} />
+            <span>Season/Episode</span>
+          </button>
+        </div>
       </div>
+
+      {scanError && (
+        <div className="empty-state" style={{ marginBottom: 16 }}>
+          <p>{scanError}</p>
+        </div>
+      )}
 
       {filteredItems.length === 0 ? (
         <div className="empty-state">
           <HardDrive size={36} className="text-zinc-600 mb-2" />
           <h3>No Scanned Local Media Found</h3>
-          <p>Click "Scan" above to index video files from your configured media folders.</p>
+          <p>Click "Browse & Scan" to index video files from your media folders.</p>
         </div>
       ) : viewStyle === "grid" ? (
         <div className="library-grid">

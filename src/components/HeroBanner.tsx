@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { motion } from "motion/react";
-import { Play, Plus, Check, ChevronLeft, ChevronRight } from "lucide-react";
+import { Play, ChevronLeft, ChevronRight } from "lucide-react";
 import { MediaItem } from "../types";
 import { getHeroImageUrl } from "../utils/mediaImages";
 import { QuickActionPlusMenu } from "./QuickActionPlusMenu";
@@ -18,7 +18,7 @@ export function HeroBanner({
   items,
   onSelect,
   onPlay,
-  watchlist,
+  watchlist: _watchlist,
   onToggleWatchlist,
 }: HeroBannerProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
@@ -33,7 +33,6 @@ export function HeroBanner({
 
   if (!items || items.length === 0) return null;
   const item = items[currentIndex] || items[0];
-  const isInWatchlist = watchlist.includes(item.id);
 
   const metaBits = [
     item.year,

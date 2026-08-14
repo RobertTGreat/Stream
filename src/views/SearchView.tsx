@@ -10,11 +10,13 @@ interface SearchViewProps {
   trendingMovies?: MediaItem[];
   trendingTv?: MediaItem[];
   isLoading: boolean;
+  error?: string | null;
   onSearch: (query: string, type: MediaType, genre?: string, year?: number) => void;
   onSelectMedia: (media: MediaItem) => void;
   onPlayMedia: (media: MediaItem) => void;
   favorites: string[];
   onToggleFavorite: (id: string) => void;
+  onToggleWatchlist?: (id: string) => void;
   onContextMenu?: (e: React.MouseEvent, media: MediaItem) => void;
 }
 
@@ -24,11 +26,13 @@ export function SearchView({
   trendingMovies = [],
   trendingTv = [],
   isLoading,
+  error,
   onSearch,
   onSelectMedia,
   onPlayMedia,
   favorites,
   onToggleFavorite,
+  onToggleWatchlist,
   onContextMenu,
 }: SearchViewProps) {
   const [query, setQuery] = useState("");
@@ -161,11 +165,9 @@ export function SearchView({
               className="filter-select"
             >
               <option value="">Any Year</option>
-              <option value="2024">2024</option>
-              <option value="2023">2023</option>
-              <option value="2022">2022</option>
-              <option value="2021">2021</option>
-              <option value="2020">2020</option>
+              {Array.from({ length: new Date().getFullYear() - 1999 }, (_, i) => String(new Date().getFullYear() - i)).map((y) => (
+                <option key={y} value={y}>{y}</option>
+              ))}
             </select>
           </div>
         </aside>
@@ -207,9 +209,13 @@ export function SearchView({
               <RefreshCw size={24} className="spin-icon" />
               <p>Searching metadata databases...</p>
             </div>
-          ) : searchResults.length === 0 ? (
+          ) : error ? (
             <div className="empty-state">
-              <p>Enter a search query or adjust filters to discover media.</p>
+              <p>{error}</p>
+            </div>
+          ) : displayItems.length === 0 ? (
+            <div className="empty-state">
+              <p>{isFiltered ? "No titles matched those filters." : "Type a query or adjust filters to discover media."}</p>
             </div>
           ) : (
             <div ref={containerRef} className="catalog-grid">
@@ -222,6 +228,7 @@ export function SearchView({
                   onPlay={onPlayMedia}
                   isFavorite={favorites.includes(item.id)}
                   onToggleFavorite={onToggleFavorite}
+                  onToggleWatchlist={onToggleWatchlist}
                   onContextMenu={onContextMenu}
                 />
               ))}

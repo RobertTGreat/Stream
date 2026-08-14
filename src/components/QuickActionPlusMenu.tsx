@@ -30,7 +30,7 @@ export function QuickActionPlusMenu({
   const [isFavState, setIsFavState] = useState(() => isFavProp ?? StorageService.isFavorite(mediaId));
   const [inWatchlist, setInWatchlist] = useState(() => StorageService.isInWatchlist(mediaId));
   const [isWatched, setIsWatched] = useState(() =>
-    StorageService.getWatchProgress().some((h) => h.mediaId === mediaId && h.completed)
+    StorageService.getWatchProgress().some((h) => h.mediaId === mediaId && (h.completed || h.percentage >= 90))
   );
 
   const handleToggleFav = (e: React.MouseEvent) => {
@@ -63,10 +63,11 @@ export function QuickActionPlusMenu({
         mediaId,
         mediaTitle,
         mediaType,
-        coverImage,
+        coverImage: coverImage || "",
         episodeNumber: 1,
-        progressSeconds: 1200,
-        totalDurationSeconds: 1200,
+        currentTime: 1200,
+        duration: 1200,
+        percentage: 100,
         completed: true,
         lastUpdated: Date.now(),
       });

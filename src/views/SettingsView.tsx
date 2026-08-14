@@ -1,7 +1,29 @@
-import React, { useState, useEffect } from "react";
-import { Save, Folder, Key, HardDrive, Trash2, Check, Radio, Cpu, User, Sparkles, Zap, Palette } from "lucide-react";
+import React, { useState, useEffect, useRef } from "react";
+import {
+  Save,
+  Folder,
+  FolderOpen,
+  Key,
+  HardDrive,
+  Check,
+  Radio,
+  Cpu,
+  User,
+  Sparkles,
+  Zap,
+  Palette,
+  Activity,
+  Download,
+  Upload,
+  CheckCircle2,
+  XCircle,
+  Loader2,
+  Database,
+} from "lucide-react";
 import { AppSettings, PreferredQuality, UserProfile } from "../types";
 import { ACCENT_PRESETS, applyAccentColor } from "../utils/theme";
+import { selectDirectory, checkIndexerHealth, HealthCheckResult } from "../services/tauri";
+import { StorageService } from "../services/storage";
 
 interface SettingsViewProps {
   settings: AppSettings;
@@ -21,6 +43,73 @@ export function SettingsView({
   const [formData, setFormData] = useState<AppSettings>({ ...settings });
   const [profileData, setProfileData] = useState<UserProfile>({ ...profile });
   const [savedSuccess, setSavedSuccess] = useState(false);
+  const [connectionTests, setConnectionTests] = useState<Record<string, { loading?: boolean; result?: HealthCheckResult }>>({});
+  const [backupStatus, setBackupStatus] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleBrowseFolder = async (field: keyof AppSettings, title: string) => {
+    const current = (formData[field] as string) || "";
+    const selected = await selectDirectory(title, current);
+    if (selected) {
+      handleChange(field, selected);
+    }
+  };
+
+  const handleTestConnection = async (type: "jackett" | "prowlarr" | "tmdb") => {
+    setConnectionTests((prev) => ({ ...prev, [type]: { loading: true } }));
+    let url = "";
+    let apiKey = "";
+    if (type === "jackett") {
+      url = formData.jackettUrl;
+      apiKey = formData.jackettApiKey;
+    } else if (type === "prowlarr") {
+      url = formData.prowlarrUrl;
+      apiKey = formData.prowlarrApiKey;
+    } else if (type === "tmdb") {
+      url = "https://api.themoviedb.org/3";
+      apiKey = formData.tmdbApiKey;
+    }
+
+    const res = await checkIndexerHealth(url, apiKey, type);
+    setConnectionTests((prev) => ({ ...prev, [type]: { loading: false, result: res } }));
+  };
+
+  const handleExportBackup = () => {
+    try {
+      const json = StorageService.exportBackupJson();
+      const blob = new Blob([json], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `stream-backup-${new Date().toISOString().slice(0, 10)}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      setBackupStatus("Backup exported successfully!");
+      setTimeout(() => setBackupStatus(null), 3000);
+    } catch (e) {
+      setBackupStatus("Failed to export backup.");
+    }
+  };
+
+  const handleImportBackup = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const content = ev.target?.result as string;
+      if (!content) return;
+      const res = StorageService.importBackupJson(content);
+      if (res.success) {
+        setBackupStatus("Backup restored! Reloading settings...");
+        setTimeout(() => window.location.reload(), 1200);
+      } else {
+        setBackupStatus(`Import failed: ${res.error || "Invalid file"}`);
+      }
+    };
+    reader.readAsText(file);
+  };
 
   const handleChange = (field: keyof AppSettings, value: any) => {
     setFormData((prev) => {
@@ -128,33 +217,68 @@ export function SettingsView({
           <div className="form-grid">
             <div className="form-group">
               <label className="input-label">Anime Library Folder</label>
-              <input
-                type="text"
-                value={formData.animeFolder}
-                onChange={(e) => handleChange("animeFolder", e.target.value)}
-                className="setting-input"
-                placeholder="C:\Media\Anime"
-              />
+              <div className="input-browse-group">
+                <input
+                  type="text"
+                  value={formData.animeFolder}
+                  onChange={(e) => handleChange("animeFolder", e.target.value)}
+                  className="setting-input"
+                  placeholder="C:\Media\Anime"
+                />
+                <button
+                  type="button"
+                  className="btn-secondary btn-browse"
+                  onClick={() => handleBrowseFolder("animeFolder", "Select Anime Folder")}
+                  title="Browse folder..."
+                >
+                  <FolderOpen size={14} />
+                  <span>Browse</span>
+                </button>
+              </div>
             </div>
+
             <div className="form-group">
               <label className="input-label">Movies Library Folder</label>
-              <input
-                type="text"
-                value={formData.moviesFolder}
-                onChange={(e) => handleChange("moviesFolder", e.target.value)}
-                className="setting-input"
-                placeholder="C:\Media\Movies"
-              />
+              <div className="input-browse-group">
+                <input
+                  type="text"
+                  value={formData.moviesFolder}
+                  onChange={(e) => handleChange("moviesFolder", e.target.value)}
+                  className="setting-input"
+                  placeholder="C:\Media\Movies"
+                />
+                <button
+                  type="button"
+                  className="btn-secondary btn-browse"
+                  onClick={() => handleBrowseFolder("moviesFolder", "Select Movies Folder")}
+                  title="Browse folder..."
+                >
+                  <FolderOpen size={14} />
+                  <span>Browse</span>
+                </button>
+              </div>
             </div>
+
             <div className="form-group">
               <label className="input-label">TV Series Library Folder</label>
-              <input
-                type="text"
-                value={formData.tvFolder}
-                onChange={(e) => handleChange("tvFolder", e.target.value)}
-                className="setting-input"
-                placeholder="C:\Media\TV Shows"
-              />
+              <div className="input-browse-group">
+                <input
+                  type="text"
+                  value={formData.tvFolder}
+                  onChange={(e) => handleChange("tvFolder", e.target.value)}
+                  className="setting-input"
+                  placeholder="C:\Media\TV Shows"
+                />
+                <button
+                  type="button"
+                  className="btn-secondary btn-browse"
+                  onClick={() => handleBrowseFolder("tvFolder", "Select TV Shows Folder")}
+                  title="Browse folder..."
+                >
+                  <FolderOpen size={14} />
+                  <span>Browse</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>
@@ -168,13 +292,24 @@ export function SettingsView({
           <div className="form-grid">
             <div className="form-group">
               <label className="input-label">Default Download Storage Path</label>
-              <input
-                type="text"
-                value={formData.downloadPath}
-                onChange={(e) => handleChange("downloadPath", e.target.value)}
-                className="setting-input"
-                placeholder="C:\Downloads\Stream"
-              />
+              <div className="input-browse-group">
+                <input
+                  type="text"
+                  value={formData.downloadPath}
+                  onChange={(e) => handleChange("downloadPath", e.target.value)}
+                  className="setting-input"
+                  placeholder="C:\Downloads\Stream"
+                />
+                <button
+                  type="button"
+                  className="btn-secondary btn-browse"
+                  onClick={() => handleBrowseFolder("downloadPath", "Select Download Directory")}
+                  title="Browse directory..."
+                >
+                  <FolderOpen size={14} />
+                  <span>Browse</span>
+                </button>
+              </div>
             </div>
             <div className="form-group">
               <label className="input-label">Max Concurrent Downloads</label>
@@ -183,103 +318,42 @@ export function SettingsView({
                 min={1}
                 max={10}
                 value={formData.maxConcurrentDownloads}
-                onChange={(e) => handleChange("maxConcurrentDownloads", parseInt(e.target.value, 10))}
+                onChange={(e) => handleChange("maxConcurrentDownloads", parseInt(e.target.value, 10) || 1)}
+                className="setting-input"
+              />
+            </div>
+            <div className="form-group">
+              <label className="input-label">Download Speed Limit (MB/s, 0 = unlimited)</label>
+              <input
+                type="number"
+                min={0}
+                max={500}
+                value={formData.speedLimitMBps || 0}
+                onChange={(e) => handleChange("speedLimitMBps", parseInt(e.target.value, 10) || 0)}
                 className="setting-input"
               />
             </div>
           </div>
-
-          <div className="form-group full-width mt-4">
-            <label className="input-label">Post-Watch File Preference</label>
-            <div className="post-watch-grid">
-              <button
-                type="button"
-                onClick={() => handleChange("postWatchBehavior", "keep")}
-                className={`post-watch-card ${formData.postWatchBehavior === "keep" ? "active-keep" : ""}`}
-              >
-                <div className={`post-watch-icon ${formData.postWatchBehavior === "keep" ? "on" : ""}`}>
-                  <HardDrive size={20} />
-                </div>
-                <div>
-                  <div className="post-watch-title">Keep Downloads</div>
-                  <div className="post-watch-desc">Preserve downloaded media files in your library</div>
-                </div>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => handleChange("postWatchBehavior", "delete")}
-                className={`post-watch-card ${formData.postWatchBehavior === "delete" ? "active-delete" : ""}`}
-              >
-                <div className={`post-watch-icon danger ${formData.postWatchBehavior === "delete" ? "on" : ""}`}>
-                  <Trash2 size={20} />
-                </div>
-                <div>
-                  <div className="post-watch-title">Delete Cache After Watching</div>
-                  <div className="post-watch-desc">Clean up stream cache when done</div>
-                </div>
-              </button>
-            </div>
-          </div>
         </div>
 
-        {/* Appearance / accent */}
-        <div className="settings-card" id="settings-appearance">
+        {/* Section 2.5: Appearance & Theme Accents */}
+        <div className="settings-card" id="settings-theme">
           <div className="card-header-row">
             <Palette size={18} className="text-purple-400" />
-            <h3>Appearance</h3>
+            <h3>Theme & Accent Color</h3>
           </div>
-          <p className="settings-card-hint">
-            Accent color for highlights, active nav, progress bars, and focus states.
-          </p>
-          <div className="accent-picker-row">
-            <label className="accent-swatch-input">
-              <input
-                type="color"
-                value={formData.accentColor || "#a855f7"}
-                onChange={(e) => handleChange("accentColor", e.target.value)}
-                aria-label="Accent color"
-              />
-              <span className="accent-swatch-preview" style={{ background: formData.accentColor || "#a855f7" }} />
-            </label>
-            <div className="accent-picker-meta">
-              <div className="post-watch-title">Accent color</div>
-              <div className="post-watch-desc font-mono">{(formData.accentColor || "#a855f7").toUpperCase()}</div>
-            </div>
-            <input
-              type="text"
-              className="setting-input accent-hex-input"
-              value={formData.accentColor || "#a855f7"}
-              onChange={(e) => {
-                const v = e.target.value.trim();
-                if (/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(v)) {
-                  handleChange("accentColor", v);
-                } else {
-                  setFormData((prev) => ({ ...prev, accentColor: v }));
-                }
-              }}
-              onBlur={() => {
-                const v = (formData.accentColor || "").trim();
-                if (!/^#([0-9a-fA-F]{3}|[0-9a-fA-F]{6})$/.test(v)) {
-                  handleChange("accentColor", "#a855f7");
-                }
-              }}
-              placeholder="#a855f7"
-            />
-          </div>
-          <div className="accent-presets">
-            {ACCENT_PRESETS.map((p) => (
+          <div className="theme-accents-row">
+            {ACCENT_PRESETS.map((preset) => (
               <button
-                key={p.value}
+                key={preset.value}
                 type="button"
-                className={`accent-preset-btn ${
-                  (formData.accentColor || "").toLowerCase() === p.value.toLowerCase() ? "is-active" : ""
-                }`}
-                style={{ "--preset": p.value } as React.CSSProperties}
-                title={p.label}
-                aria-label={p.label}
-                onClick={() => handleChange("accentColor", p.value)}
-              />
+                className={`theme-preset-btn ${formData.accentColor === preset.value ? "active" : ""}`}
+                onClick={() => handleChange("accentColor", preset.value)}
+                style={{ "--preset-color": preset.value } as React.CSSProperties}
+              >
+                <span className="preset-circle" />
+                <span className="preset-label">{preset.label}</span>
+              </button>
             ))}
           </div>
         </div>
@@ -443,6 +517,91 @@ export function SettingsView({
                 </div>
               )}
             </div>
+
+            <div className="provider-item-box">
+              <div className="provider-top-row">
+                <div className="provider-title-wrap">
+                  <span className="provider-name">Torrentio</span>
+                  <span className="provider-desc">Stremio catalog streams for movies, TV, and anime</span>
+                </div>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={formData.enableTorrentio ?? true}
+                    onChange={(e) => handleChange("enableTorrentio", e.target.checked)}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+              </div>
+            </div>
+
+            <div className="provider-item-box">
+              <div className="provider-top-row">
+                <div className="provider-title-wrap">
+                  <span className="provider-name">SubsPlease</span>
+                  <span className="provider-desc">Weekly anime encodes</span>
+                </div>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={formData.enableSubsPlease ?? true}
+                    onChange={(e) => handleChange("enableSubsPlease", e.target.checked)}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+              </div>
+            </div>
+
+            <div className="provider-item-box">
+              <div className="provider-top-row">
+                <div className="provider-title-wrap">
+                  <span className="provider-name">YTS</span>
+                  <span className="provider-desc">Compact movie encodes</span>
+                </div>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={formData.enableYts ?? true}
+                    onChange={(e) => handleChange("enableYts", e.target.checked)}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+              </div>
+            </div>
+
+            <div className="provider-item-box">
+              <div className="provider-top-row">
+                <div className="provider-title-wrap">
+                  <span className="provider-name">EZTV</span>
+                  <span className="provider-desc">TV episode torrents via IMDb</span>
+                </div>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={formData.enableEztv ?? true}
+                    onChange={(e) => handleChange("enableEztv", e.target.checked)}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+              </div>
+            </div>
+
+            <div className="provider-item-box">
+              <div className="provider-top-row">
+                <div className="provider-title-wrap">
+                  <span className="provider-name">The Pirate Bay</span>
+                  <span className="provider-desc">Public movie and TV search via Apibay</span>
+                </div>
+                <label className="toggle-switch">
+                  <input
+                    type="checkbox"
+                    checked={formData.enablePirateBay ?? true}
+                    onChange={(e) => handleChange("enablePirateBay", e.target.checked)}
+                  />
+                  <span className="toggle-slider" />
+                </label>
+              </div>
+            </div>
           </div>
         </div>
 
@@ -457,14 +616,25 @@ export function SettingsView({
             <div className="form-group">
               <div className="flex items-center justify-between mb-1">
                 <label className="input-label mb-0">Jackett Server URL</label>
-                <label className="toggle-switch small">
-                  <input
-                    type="checkbox"
-                    checked={formData.enableJackett}
-                    onChange={(e) => handleChange("enableJackett", e.target.checked)}
-                  />
-                  <span className="toggle-slider" />
-                </label>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="btn-test-conn"
+                    onClick={() => handleTestConnection("jackett")}
+                    disabled={connectionTests.jackett?.loading}
+                  >
+                    {connectionTests.jackett?.loading ? <Loader2 size={12} className="animate-spin" /> : <Activity size={12} />}
+                    <span>Test</span>
+                  </button>
+                  <label className="toggle-switch small">
+                    <input
+                      type="checkbox"
+                      checked={formData.enableJackett}
+                      onChange={(e) => handleChange("enableJackett", e.target.checked)}
+                    />
+                    <span className="toggle-slider" />
+                  </label>
+                </div>
               </div>
               <input
                 type="text"
@@ -473,6 +643,12 @@ export function SettingsView({
                 className="setting-input"
                 disabled={!formData.enableJackett}
               />
+              {connectionTests.jackett?.result && (
+                <div className={`conn-status-tag ${connectionTests.jackett.result.ok ? "ok" : "err"}`}>
+                  {connectionTests.jackett.result.ok ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
+                  <span>{connectionTests.jackett.result.message}</span>
+                </div>
+              )}
             </div>
 
             <div className="form-group">
@@ -491,14 +667,25 @@ export function SettingsView({
             <div className="form-group">
               <div className="flex items-center justify-between mb-1">
                 <label className="input-label mb-0">Prowlarr Server URL</label>
-                <label className="toggle-switch small">
-                  <input
-                    type="checkbox"
-                    checked={formData.enableProwlarr}
-                    onChange={(e) => handleChange("enableProwlarr", e.target.checked)}
-                  />
-                  <span className="toggle-slider" />
-                </label>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    className="btn-test-conn"
+                    onClick={() => handleTestConnection("prowlarr")}
+                    disabled={connectionTests.prowlarr?.loading}
+                  >
+                    {connectionTests.prowlarr?.loading ? <Loader2 size={12} className="animate-spin" /> : <Activity size={12} />}
+                    <span>Test</span>
+                  </button>
+                  <label className="toggle-switch small">
+                    <input
+                      type="checkbox"
+                      checked={formData.enableProwlarr}
+                      onChange={(e) => handleChange("enableProwlarr", e.target.checked)}
+                    />
+                    <span className="toggle-slider" />
+                  </label>
+                </div>
               </div>
               <input
                 type="text"
@@ -507,6 +694,12 @@ export function SettingsView({
                 className="setting-input"
                 disabled={!formData.enableProwlarr}
               />
+              {connectionTests.prowlarr?.result && (
+                <div className={`conn-status-tag ${connectionTests.prowlarr.result.ok ? "ok" : "err"}`}>
+                  {connectionTests.prowlarr.result.ok ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
+                  <span>{connectionTests.prowlarr.result.message}</span>
+                </div>
+              )}
             </div>
 
             <div className="form-group">
@@ -523,6 +716,57 @@ export function SettingsView({
           </div>
         </div>
 
+        <div className="settings-card" id="settings-playback">
+          <div className="card-header-row">
+            <Zap size={18} className="text-sky-400" />
+            <h3>Playback</h3>
+          </div>
+          <div className="easy-watch-row">
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={formData.autoPlayNext ?? true}
+                onChange={(e) => handleChange("autoPlayNext", e.target.checked)}
+              />
+              <span className="toggle-slider" />
+            </label>
+            <div>
+              <div className="post-watch-title">Auto-play next episode</div>
+              <div className="post-watch-desc">When a series episode ends, start the next one</div>
+            </div>
+          </div>
+          <div className="easy-watch-row mt-4">
+            <label className="toggle-switch">
+              <input
+                type="checkbox"
+                checked={formData.hardwareAcceleration ?? true}
+                onChange={(e) => handleChange("hardwareAcceleration", e.target.checked)}
+              />
+              <span className="toggle-slider" />
+            </label>
+            <div>
+              <div className="post-watch-title">Hardware acceleration</div>
+              <div className="post-watch-desc">Use GPU decode in mpv when available</div>
+            </div>
+          </div>
+          <div className="form-grid mt-4">
+            <div className="form-group">
+              <label className="input-label">Preferred subtitles</label>
+              <select
+                className="setting-input"
+                value={formData.defaultSubtitles || "English"}
+                onChange={(e) => handleChange("defaultSubtitles", e.target.value)}
+              >
+                <option value="English">English</option>
+                <option value="Japanese">Japanese</option>
+                <option value="Spanish">Spanish</option>
+                <option value="French">French</option>
+                <option value="German">German</option>
+              </select>
+            </div>
+          </div>
+        </div>
+
         {/* Section 5: TMDB Metadata Key Override */}
         <div className="settings-card" id="settings-api">
           <div className="card-header-row">
@@ -531,7 +775,18 @@ export function SettingsView({
           </div>
           <div className="form-grid">
             <div className="form-group">
-              <label className="input-label">TMDB API Key (Optional Override)</label>
+              <div className="flex items-center justify-between mb-1">
+                <label className="input-label mb-0">TMDB API Key (Optional Override)</label>
+                <button
+                  type="button"
+                  className="btn-test-conn"
+                  onClick={() => handleTestConnection("tmdb")}
+                  disabled={connectionTests.tmdb?.loading}
+                >
+                  {connectionTests.tmdb?.loading ? <Loader2 size={12} className="animate-spin" /> : <Activity size={12} />}
+                  <span>Test API</span>
+                </button>
+              </div>
               <input
                 type="password"
                 placeholder="Leave blank to use built-in TMDB key"
@@ -539,7 +794,58 @@ export function SettingsView({
                 onChange={(e) => handleChange("tmdbApiKey", e.target.value)}
                 className="setting-input"
               />
+              {connectionTests.tmdb?.result && (
+                <div className={`conn-status-tag ${connectionTests.tmdb.result.ok ? "ok" : "err"}`}>
+                  {connectionTests.tmdb.result.ok ? <CheckCircle2 size={12} /> : <XCircle size={12} />}
+                  <span>{connectionTests.tmdb.result.message}</span>
+                </div>
+              )}
             </div>
+          </div>
+        </div>
+
+        {/* Section 6: Backup & Data Management */}
+        <div className="settings-card" id="settings-backup">
+          <div className="card-header-row">
+            <Database size={18} className="text-purple-400" />
+            <h3>Data Management & Backups</h3>
+          </div>
+          <p className="settings-card-hint">
+            Export your watch history, watchlist, favorites, custom collections, and settings to a JSON file, or restore a previous backup.
+          </p>
+          <div className="backup-actions-row flex items-center gap-3 mt-3">
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={handleExportBackup}
+            >
+              <Download size={14} />
+              <span>Export Backup JSON</span>
+            </button>
+
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => importInputRef.current?.click()}
+            >
+              <Upload size={14} />
+              <span>Import Backup JSON</span>
+            </button>
+
+            <input
+              ref={importInputRef}
+              type="file"
+              accept=".json"
+              className="hidden"
+              style={{ display: "none" }}
+              onChange={handleImportBackup}
+            />
+
+            {backupStatus && (
+              <span className="text-xs font-semibold text-purple-300 ml-2">
+                {backupStatus}
+              </span>
+            )}
           </div>
         </div>
 

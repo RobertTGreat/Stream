@@ -15,6 +15,68 @@ export async function invokeTauri<T>(cmd: string, args: Record<string, unknown> 
   return mockTauriResponse<T>(cmd, args);
 }
 
+export interface DiscordActivityPayload {
+  details?: string;
+  state?: string;
+  start_time?: number;
+  end_time?: number;
+  large_image?: string;
+  large_text?: string;
+  small_image?: string;
+  small_text?: string;
+}
+
+export async function setDiscordActivity(activity: DiscordActivityPayload, clientId?: string): Promise<void> {
+  try {
+    await invokeTauri("set_discord_activity_cmd", { activity, client_id: clientId });
+  } catch {
+    // Discord may not be open
+  }
+}
+
+export interface HealthCheckResult {
+  ok: boolean;
+  latency_ms: number;
+  message: string;
+}
+
+export async function selectDirectory(title?: string, defaultPath?: string): Promise<string | null> {
+  try {
+    return await invokeTauri<string | null>("select_directory_cmd", { title, default_path: defaultPath });
+  } catch (err) {
+    console.warn("Folder picker error:", err);
+    return null;
+  }
+}
+
+export async function checkIndexerHealth(
+  url: string,
+  apiKey?: string,
+  indexerType: "jackett" | "prowlarr" | "tmdb" | "custom" = "custom"
+): Promise<HealthCheckResult> {
+  try {
+    return await invokeTauri<HealthCheckResult>("check_indexer_health_cmd", {
+      url,
+      api_key: apiKey,
+      indexer_type: indexerType,
+    });
+  } catch (err) {
+    return {
+      ok: false,
+      latency_ms: 0,
+      message: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
+export async function clearDiscordActivity(): Promise<void> {
+  try {
+    await invokeTauri("clear_discord_activity_cmd", {});
+  } catch {
+    // Discord may not be open
+  }
+}
+
 function mockTauriResponse<T>(cmd: string, args: Record<string, unknown>): Promise<T> {
   return new Promise((resolve) => {
     setTimeout(() => {
@@ -47,7 +109,7 @@ function mockTauriResponse<T>(cmd: string, args: Record<string, unknown>): Promi
             last_modified: Date.now() / 1000 - 172800,
           },
         ];
-        resolve(mocks as unknown as T);
+        resolve({ items: mocks, error: null } as unknown as T);
         return;
       }
 
@@ -123,6 +185,7 @@ function mockTauriResponse<T>(cmd: string, args: Record<string, unknown>): Promi
           buffered_percent: 0,
           title: (args.title as string) || "Stream Video",
           selected_file_index: (args.file_index as number) || 0,
+          needs_file_pick: false,
           files: [
             { index: 0, name: "Episode 01.mkv", length: 1450000000, is_video: true },
           ],
@@ -151,6 +214,20 @@ function mockTauriResponse<T>(cmd: string, args: Record<string, unknown>): Promi
           volume: 100,
           mute: false,
           speed: 1.0,
+        } as unknown as T);
+        return;
+      }
+
+      if (cmd === "select_directory_cmd") {
+        resolve("C:\\Downloads\\Stream" as unknown as T);
+        return;
+      }
+
+      if (cmd === "check_indexer_health_cmd") {
+        resolve({
+          ok: true,
+          latency_ms: 48,
+          message: "Connected (HTTP 200, 48ms)",
         } as unknown as T);
         return;
       }

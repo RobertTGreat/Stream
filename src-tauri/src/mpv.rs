@@ -18,13 +18,13 @@ pub struct MpvSession {
     process: Child,
     ipc_path: String,
     log_path: PathBuf,
-    _host_window_id: Option<isize>,
+    stopped: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MpvTrack {
     pub id: i64,
-    pub track_type: String, // "video", "audio", "sub"
+    pub track_type: String,
     pub title: Option<String>,
     pub lang: Option<String>,
     pub selected: bool,
@@ -33,9 +33,11 @@ pub struct MpvTrack {
 impl MpvSession {
     fn spawn(
         mpv_path: &std::path::Path,
-        host_window_id: Option<isize>,
         title: &str,
         url: Option<&str>,
+        start_at: Option<f64>,
+        hardware_acceleration: bool,
+        default_subtitles: Option<&str>,
     ) -> Result<Self, String> {
         let ipc_path = create_playback_ipc_path();
         let log_path = create_playback_log_path();
@@ -44,20 +46,39 @@ impl MpvSession {
         command
             .arg(format!("--input-ipc-server={ipc_path}"))
             .arg(format!("--log-file={}", log_path.display()))
-            .arg("--idle=yes")
+            .arg("--idle=once")
             .arg("--force-window=yes")
-            .arg("--osc=yes")
-            .arg("--script-opts=osc-layout=bottombar,osc-seekbarstyle=bar")
+            .arg("--osc=no")
+            .arg("--osd-bar=no")
+            .arg("--osd-level=1")
+            .arg("--input-cursor=yes")
+            .arg("--cursor-autohide=2500")
+            .arg("--cursor-autohide-fs-only=no")
             .arg("--border=yes")
+            .arg("--ontop=no")
             .arg("--show-in-taskbar=yes")
             .arg("--taskbar-progress=yes")
             .arg("--autofit-larger=85%x85%")
+            .arg("--input-default-bindings=yes")
             .arg("--keep-open=yes")
             .arg(format!("--title={title}"))
             .arg("--no-terminal")
-            .arg("--really-quiet")
-            .arg("--hwdec=auto-safe")
-            .arg("--input-default-bindings=yes")
+            .arg("--ytdl=no")
+            .arg("--force-seekable=yes")
+            .arg("--hr-seek=yes")
+            .arg(if hardware_acceleration {
+                "--hwdec=auto-safe"
+            } else {
+                "--hwdec=no"
+            })
+            .arg("--sub-auto=all")
+            .arg("--sub-file-paths=sub:subtitles:subs")
+            .arg(format!(
+                "--slang={}",
+                subtitle_langs(default_subtitles)
+            ))
+            .arg("--alang=jpn,ja,eng,en")
+            .arg("--sid=auto")
             .arg("--cache=yes")
             .arg("--cache-pause=yes")
             .arg("--cache-pause-initial=yes")
@@ -66,7 +87,16 @@ impl MpvSession {
             .arg("--demuxer-readahead-secs=60")
             .arg("--stream-buffer-size=512KiB");
 
+        if let Some(script) = stream_gui_script() {
+            command.arg(format!("--script={}", script.display()));
+        }
+
+        if let Some(start) = start_at.filter(|t| *t > 5.0) {
+            command.arg(format!("--start={start}"));
+        }
+
         if let Some(u) = url {
+            command.arg("--");
             command.arg(u);
         }
 
@@ -84,47 +114,93 @@ impl MpvSession {
             process,
             ipc_path,
             log_path,
-            _host_window_id: host_window_id,
+            stopped: false,
         })
     }
 
-    pub fn kill(&mut self) {
-        let _ = self.process.kill();
-        let _ = self.process.wait();
-    }
+    pub fn stop(&mut self) {
+        if self.stopped {
+            return;
+        }
+        self.stopped = true;
 
-    fn stop(mut self) {
-        self.kill();
+        // If process already exited on its own, return immediately
+        if let Ok(Some(_)) = self.process.try_wait() {
+            return;
+        }
+
+        // Fast quit dispatch to MPV without waiting or retrying
+        send_mpv_fire_and_forget(&self.ipc_path, json!(["quit"]));
+
+        // Brief 50ms grace period for graceful process exit
+        let deadline = Instant::now() + Duration::from_millis(50);
+        while Instant::now() < deadline {
+            if let Ok(Some(_)) = self.process.try_wait() {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        // Clean termination
+        let _ = self.process.kill();
+        let _ = self.process.try_wait();
+    }
+}
+
+impl Drop for MpvSession {
+    fn drop(&mut self) {
+        self.stop();
     }
 }
 
 #[tauri::command]
 pub async fn mpv_play_cmd(
     state: State<'_, MpvState>,
-    window: Window,
     url: String,
     title: Option<String>,
+    start_at: Option<f64>,
+    hardware_acceleration: Option<bool>,
+    default_subtitles: Option<String>,
 ) -> Result<(), String> {
-    let mpv_path = locate_mpv().ok_or_else(|| {
-        "mpv executable was not found. Please install mpv or place mpv.exe in system PATH."
-            .to_string()
-    })?;
-
-    let host_window_id = window.hwnd().map(|h| h.0 as isize).ok();
-    let display_title = title.unwrap_or_else(|| "Stream Playback".to_string());
-
-    let mut guard = state.0.lock().map_err(|_| "mpv state poisoned".to_string())?;
-    if let Some(existing) = guard.take() {
-        existing.stop();
+    if url.trim().is_empty() {
+        return Err("No media path or stream URL was provided.".to_string());
     }
 
-    let session = MpvSession::spawn(
-        &mpv_path,
-        host_window_id,
-        &display_title,
-        Some(&url),
-    )?;
+    let mpv_path = locate_mpv().ok_or_else(|| {
+        "mpv was not found. Install mpv and make sure mpv.exe is on PATH.".to_string()
+    })?;
+    let display_title = title.unwrap_or_else(|| "Stream Playback".to_string());
 
+    let previous = {
+        let mut guard = state.0.lock().map_err(|_| "mpv state poisoned".to_string())?;
+        guard.take()
+    };
+    if let Some(mut previous) = previous {
+        tokio::task::spawn_blocking(move || previous.stop())
+            .await
+            .ok();
+    }
+
+    let use_hwdec = hardware_acceleration.unwrap_or(true);
+    let session = tokio::task::spawn_blocking(move || {
+        let session = MpvSession::spawn(
+            &mpv_path,
+            &display_title,
+            Some(&url),
+            start_at,
+            use_hwdec,
+            default_subtitles.as_deref(),
+        )?;
+        if let Some(start) = start_at.filter(|t| *t > 5.0) {
+            let _ = wait_for_mpv_ipc(&session.ipc_path);
+            seek_when_ready(&session.ipc_path, start);
+        }
+        Ok::<_, String>(session)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+
+    let mut guard = state.0.lock().map_err(|_| "mpv state poisoned".to_string())?;
     *guard = Some(session);
     Ok(())
 }
@@ -136,15 +212,15 @@ pub async fn mpv_command_cmd(
 ) -> Result<Value, String> {
     let ipc_path = {
         let guard = state.0.lock().map_err(|_| "mpv state poisoned".to_string())?;
-        let session = guard.as_ref().ok_or_else(|| "No active mpv session.".to_string())?;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "No active mpv session.".to_string())?;
         session.ipc_path.clone()
     };
 
-    tokio::task::spawn_blocking(move || {
-        mpv_command_with_response(&ipc_path, json!(command))
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || mpv_command_with_response(&ipc_path, json!(command)))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 #[tauri::command]
@@ -154,7 +230,9 @@ pub async fn mpv_get_properties_cmd(
 ) -> Result<HashMap<String, Value>, String> {
     let ipc_path = {
         let guard = state.0.lock().map_err(|_| "mpv state poisoned".to_string())?;
-        let session = guard.as_ref().ok_or_else(|| "No active mpv session.".to_string())?;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "No active mpv session.".to_string())?;
         session.ipc_path.clone()
     };
 
@@ -170,7 +248,9 @@ pub async fn mpv_get_properties_cmd(
 pub async fn mpv_get_tracks_cmd(state: State<'_, MpvState>) -> Result<Vec<MpvTrack>, String> {
     let ipc_path = {
         let guard = state.0.lock().map_err(|_| "mpv state poisoned".to_string())?;
-        let session = guard.as_ref().ok_or_else(|| "No active mpv session.".to_string())?;
+        let session = guard
+            .as_ref()
+            .ok_or_else(|| "No active mpv session.".to_string())?;
         session.ipc_path.clone()
     };
 
@@ -189,7 +269,10 @@ pub async fn mpv_get_tracks_cmd(state: State<'_, MpvState>) -> Result<Vec<MpvTra
                     .to_string();
                 let title = item.get("title").and_then(|v| v.as_str()).map(String::from);
                 let lang = item.get("lang").and_then(|v| v.as_str()).map(String::from);
-                let selected = item.get("selected").and_then(|v| v.as_bool()).unwrap_or(false);
+                let selected = item
+                    .get("selected")
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false);
 
                 if !track_type.is_empty() {
                     tracks.push(MpvTrack {
@@ -209,8 +292,20 @@ pub async fn mpv_get_tracks_cmd(state: State<'_, MpvState>) -> Result<Vec<MpvTra
 }
 
 #[tauri::command]
-pub fn mpv_stop_cmd(state: State<'_, MpvState>) -> Result<(), String> {
-    stop_existing_session(&state);
+pub async fn mpv_stop_cmd(
+    state: State<'_, MpvState>,
+    window: Window,
+) -> Result<(), String> {
+    let previous = {
+        let mut guard = state.0.lock().map_err(|_| "mpv state poisoned".to_string())?;
+        guard.take()
+    };
+    if let Some(mut previous) = previous {
+        tokio::task::spawn_blocking(move || previous.stop())
+            .await
+            .ok();
+    }
+    let _ = window.set_focus();
     Ok(())
 }
 
@@ -219,7 +314,7 @@ pub fn mpv_is_running_cmd(state: State<'_, MpvState>) -> bool {
     if let Ok(mut guard) = state.0.lock() {
         if let Some(ref mut session) = *guard {
             match session.process.try_wait() {
-                Ok(Some(_status)) => false,
+                Ok(Some(_)) => false,
                 Ok(None) => true,
                 Err(_) => false,
             }
@@ -232,12 +327,7 @@ pub fn mpv_is_running_cmd(state: State<'_, MpvState>) -> bool {
 }
 
 #[tauri::command]
-pub fn mpv_resize_cmd(
-    _state: State<'_, MpvState>,
-    _window: Window,
-    _width: f64,
-    _height: f64,
-) -> Result<(), String> {
+pub fn mpv_resize_cmd() -> Result<(), String> {
     Ok(())
 }
 
@@ -248,14 +338,6 @@ pub fn mpv_log_tail_cmd(state: State<'_, MpvState>, lines: usize) -> Result<Stri
         .as_ref()
         .ok_or_else(|| "No active mpv session.".to_string())?;
     log_tail(&session.log_path, lines).ok_or_else(|| "No mpv log available.".to_string())
-}
-
-fn stop_existing_session(state: &State<'_, MpvState>) {
-    if let Ok(mut guard) = state.0.lock() {
-        if let Some(session) = guard.take() {
-            session.stop();
-        }
-    }
 }
 
 fn current_session<'a>(
@@ -269,6 +351,74 @@ fn current_session<'a>(
         return Err("No active mpv session.".to_string());
     }
     Ok(guard)
+}
+
+fn subtitle_langs(pref: Option<&str>) -> String {
+    let fallback = "eng,en,fre,spa,ger,jpn,ja";
+    let Some(raw) = pref.map(str::trim).filter(|s| !s.is_empty()) else {
+        return fallback.to_string();
+    };
+    let normalized = raw.to_ascii_lowercase();
+    let token = match normalized.as_str() {
+        "english" | "en" | "eng" => "eng,en",
+        "japanese" | "ja" | "jpn" | "jp" => "jpn,ja",
+        "spanish" | "es" | "spa" => "spa,es",
+        "french" | "fr" | "fre" | "fra" => "fre,fr",
+        "german" | "de" | "ger" | "deu" => "ger,de",
+        _ => raw,
+    };
+    format!("{token},{fallback}")
+}
+
+fn stream_gui_script() -> Option<PathBuf> {
+    const EMBEDDED_SCRIPT: &str = include_str!("../scripts/stream-gui.lua");
+
+    let temp_script = std::env::temp_dir().join("stream-mpv-gui.lua");
+    if fs::write(&temp_script, EMBEDDED_SCRIPT).is_ok() {
+        return Some(temp_script);
+    }
+
+    let mut candidates = Vec::new();
+    candidates.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("scripts").join("stream-gui.lua"));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("scripts").join("stream-gui.lua"));
+            candidates.push(dir.join("stream-gui.lua"));
+        }
+    }
+    candidates.into_iter().find(|p| p.is_file())
+}
+
+fn wait_for_mpv_ipc(ipc_path: &str) -> Result<(), String> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if open_mpv_ipc_stream(ipc_path).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(40));
+    }
+    Err("Timed out waiting for mpv IPC".to_string())
+}
+
+fn seek_when_ready(ipc_path: &str, start_at: f64) {
+    for _ in 0..40 {
+        let props = read_mpv_properties(
+            ipc_path,
+            &["duration".to_string(), "seekable".to_string(), "time-pos".to_string()],
+        );
+        let ready = props.as_ref().is_some_and(|p| {
+            let duration_ok = p.get("duration").and_then(Value::as_f64).unwrap_or(0.0) > start_at;
+            let seekable = p.get("seekable").and_then(Value::as_bool).unwrap_or(false);
+            let has_pos = p.get("time-pos").and_then(Value::as_f64).is_some();
+            duration_ok || seekable || has_pos
+        });
+        if ready {
+            let _ = mpv_command_with_response(ipc_path, json!(["seek", start_at, "absolute"]));
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(250));
+    }
+    let _ = mpv_command_with_response(ipc_path, json!(["seek", start_at, "absolute"]));
 }
 
 fn locate_mpv() -> Option<PathBuf> {
@@ -360,12 +510,6 @@ fn create_playback_log_path() -> PathBuf {
 }
 
 fn open_mpv_ipc_stream(ipc_path: &str) -> Result<std::fs::File, String> {
-    for _ in 0..25 {
-        if let Ok(file) = OpenOptions::new().read(true).write(true).open(ipc_path) {
-            return Ok(file);
-        }
-        std::thread::sleep(Duration::from_millis(15));
-    }
     OpenOptions::new()
         .read(true)
         .write(true)
@@ -373,47 +517,13 @@ fn open_mpv_ipc_stream(ipc_path: &str) -> Result<std::fs::File, String> {
         .map_err(|error| format!("Could not open mpv IPC pipe: {error}"))
 }
 
-fn _wait_for_mpv_ipc(ipc_path: &str) -> Result<(), String> {
-    let deadline = Instant::now() + Duration::from_secs(3);
-    while Instant::now() < deadline {
-        if open_mpv_ipc_stream(ipc_path).is_ok() {
-            return Ok(());
-        }
-        std::thread::sleep(Duration::from_millis(25));
+fn send_mpv_fire_and_forget(ipc_path: &str, command: Value) {
+    if let Ok(mut ipc_stream) = open_mpv_ipc_stream(ipc_path) {
+        let payload = json!({ "command": command }).to_string();
+        let _ = ipc_stream.write_all(payload.as_bytes());
+        let _ = ipc_stream.write_all(b"\n");
+        let _ = ipc_stream.flush();
     }
-    Err("Timed out waiting for mpv IPC server".to_string())
-}
-
-fn _send_mpv_ipc_command(ipc_path: &str, command: Value) -> bool {
-    let request_id = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(1);
-
-    let payload = json!({
-        "command": command,
-        "request_id": request_id,
-    })
-    .to_string();
-
-    for _ in 0..40 {
-        if _write_mpv_ipc_payload(ipc_path, &payload) {
-            return true;
-        }
-        std::thread::sleep(Duration::from_millis(25));
-    }
-
-    false
-}
-
-fn _write_mpv_ipc_payload(ipc_path: &str, payload: &str) -> bool {
-    let Ok(mut ipc_stream) = open_mpv_ipc_stream(ipc_path) else {
-        return false;
-    };
-
-    ipc_stream.write_all(payload.as_bytes()).is_ok()
-        && ipc_stream.write_all(b"\n").is_ok()
-        && ipc_stream.flush().is_ok()
 }
 
 fn mpv_command_with_response(ipc_path: &str, command: Value) -> Result<Value, String> {
@@ -439,7 +549,11 @@ fn mpv_command_with_response(ipc_path: &str, command: Value) -> Result<Value, St
     let mut reader = BufReader::new(ipc_stream);
     for _ in 0..64 {
         let mut response_line = String::new();
-        if reader.read_line(&mut response_line).map_err(|e| e.to_string())? == 0 {
+        if reader
+            .read_line(&mut response_line)
+            .map_err(|e| e.to_string())?
+            == 0
+        {
             break;
         }
         let response: Value = serde_json::from_str(&response_line)
@@ -470,8 +584,7 @@ fn read_mpv_properties(
         })
         .to_string();
 
-        if ipc_stream.write_all(payload.as_bytes()).is_err()
-            || ipc_stream.write_all(b"\n").is_err()
+        if ipc_stream.write_all(payload.as_bytes()).is_err() || ipc_stream.write_all(b"\n").is_err()
         {
             return None;
         }
@@ -523,12 +636,4 @@ fn log_tail(log_path: &Path, lines: usize) -> Option<String> {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn hide_child_process_window(command: &mut Command) {
-    use std::os::windows::process::CommandExt;
-    const CREATE_NO_WINDOW_FLAG: u32 = 0x08000000;
-    command.creation_flags(CREATE_NO_WINDOW_FLAG);
-}
-
-#[cfg(not(target_os = "windows"))]
 fn hide_child_process_window(_command: &mut Command) {}
