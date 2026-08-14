@@ -709,13 +709,21 @@ function MainApp() {
       }
       setWatchProgress(StorageService.getWatchProgress());
 
-      if (media.anilistId && profile.anilistToken && markAsWatched) {
-        const isFinished = media.episodesCount ? ep.episodeNumber >= media.episodesCount : false;
-        await AniListService.updateAniListProgress({
-          anilistId: media.anilistId,
-          episodeNumber: ep.episodeNumber,
-          status: isFinished ? "COMPLETED" : "CURRENT",
-        });
+      if (media.anilistId && profile.anilistToken) {
+        if (markAsWatched) {
+          const isFinished = media.episodesCount ? ep.episodeNumber >= media.episodesCount : false;
+          await AniListService.updateAniListProgress({
+            anilistId: media.anilistId,
+            episodeNumber: ep.episodeNumber,
+            status: isFinished ? "COMPLETED" : "CURRENT",
+          });
+        } else {
+          await AniListService.updateAniListProgress({
+            anilistId: media.anilistId,
+            episodeNumber: Math.max(0, ep.episodeNumber - 1),
+            status: ep.episodeNumber <= 1 ? "PLANNING" : "CURRENT",
+          });
+        }
       }
     } else {
       if (markAsWatched) {
@@ -788,8 +796,18 @@ function MainApp() {
 
   const handleRemoveFromContinue = (media: MediaItem, progress?: StreamProgress) => {
     StorageService.dismissFromContinue(media.id);
+    if (media.anilistId) {
+      StorageService.dismissFromContinue(String(media.anilistId));
+      StorageService.dismissFromContinue(`ani_${media.anilistId}`);
+    }
+    if (media.id.startsWith("ani_")) {
+      StorageService.dismissFromContinue(media.id.replace("ani_", ""));
+    }
     if (progress) {
       StorageService.removeWatchProgress(progress.mediaId, progress.episodeNumber);
+      StorageService.removeSeriesProgress(progress.mediaId);
+    } else {
+      StorageService.removeSeriesProgress(media.id);
     }
     setContinueDismissed(StorageService.getContinueDismissed());
     setWatchProgress(StorageService.getWatchProgress());
@@ -1269,12 +1287,30 @@ function MainApp() {
         state={contextMenu}
         onClose={() => setContextMenu((prev) => ({ ...prev, isOpen: false }))}
         onMarkWatched={handleMarkWatched}
-        onPlay={(media, ep) => handleOpenTorrentModal("stream", ep, media)}
-        onDownload={(media, ep) => handleOpenTorrentModal("download", ep, media)}
+        onPlay={(media, ep) => {
+          StorageService.cacheMedia(media);
+          setSelectedMedia(media);
+          if (ep) {
+            void handleOpenTorrentModal("stream", ep, media);
+          } else {
+            handlePlayMediaDirectly(media);
+          }
+        }}
+        onDownload={(media, ep) => {
+          StorageService.cacheMedia(media);
+          setSelectedMedia(media);
+          void handleOpenTorrentModal("download", ep, media);
+        }}
         onToggleFavorite={handleToggleFavorite}
         onToggleWatchlist={handleToggleWatchlist}
-        onAddToCollection={(mediaId) => setCollectionPicker({ mediaId })}
-        onOpenDetails={handleSelectMedia}
+        onAddToCollection={(mediaId) => {
+          if (contextMenu.media) StorageService.cacheMedia(contextMenu.media);
+          setCollectionPicker({ mediaId });
+        }}
+        onOpenDetails={(media) => {
+          StorageService.cacheMedia(media);
+          handleSelectMedia(media);
+        }}
         onRemoveFromContinue={handleRemoveFromContinue}
       />
 
@@ -1426,38 +1462,6 @@ function MainApp() {
           </div>
         </div>
       )}
-
-      <ContextMenu
-        state={contextMenu}
-        onClose={() => setContextMenu((prev) => ({ ...prev, isOpen: false }))}
-        onMarkWatched={handleMarkWatched}
-        onPlay={(media, ep) => {
-          StorageService.cacheMedia(media);
-          setSelectedMedia(media);
-          if (ep) {
-            handleOpenTorrentModal("stream", ep, media);
-          } else {
-            handlePlayMediaDirectly(media);
-          }
-        }}
-        onDownload={(media, ep) => {
-          StorageService.cacheMedia(media);
-          setSelectedMedia(media);
-          handleOpenTorrentModal("download", ep, media);
-        }}
-        onToggleFavorite={handleToggleFavorite}
-        onToggleWatchlist={handleToggleWatchlist}
-        onAddToCollection={(mediaId) => {
-          if (contextMenu.media) StorageService.cacheMedia(contextMenu.media);
-          setCollectionPicker({ mediaId });
-        }}
-        onOpenDetails={(media) => {
-          StorageService.cacheMedia(media);
-          setSelectedMedia(media);
-          navigateTo("media-detail");
-        }}
-        onRemoveFromContinue={handleRemoveFromContinue}
-      />
     </div>
   );
 }

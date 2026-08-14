@@ -414,7 +414,13 @@ export function HomeView({
     const dismissed = new Set(continueDismissed);
 
     const claim = (mediaId: string, anilistId: number | undefined, title: string) => {
-      if (dismissed.has(mediaId)) return false;
+      const rawAniId = anilistId ? String(anilistId) : mediaId.startsWith("ani_") ? mediaId.replace("ani_", "") : undefined;
+      if (
+        dismissed.has(mediaId) ||
+        (rawAniId && (dismissed.has(rawAniId) || dismissed.has(`ani_${rawAniId}`)))
+      ) {
+        return false;
+      }
       const titleKey = normalizeMediaTitle(title);
       if (seenIds.has(mediaId)) return false;
       if (anilistId && seenAnilist.has(anilistId)) return false;
@@ -719,7 +725,16 @@ export function HomeView({
                               coverImage: item.coverImage,
                               genres: [],
                             };
-                            onContextMenu(e, media, undefined, { fromContinue: true, progress: item });
+                            const targetEp: Episode = {
+                              id: `ep_${item.mediaId}_${displayEp}`,
+                              episodeNumber: displayEp,
+                              seasonNumber: 1,
+                              title: isMovie ? item.mediaTitle : `Episode ${displayEp}`,
+                              synopsis: "",
+                              thumbnail: backdropUrl,
+                              durationMinutes: 24,
+                            };
+                            onContextMenu(e, media, targetEp, { fromContinue: true, progress: item });
                           }
                         }}
                         initial={{ opacity: 0, y: 8 }}
@@ -783,7 +798,17 @@ export function HomeView({
                         if (onContextMenu) {
                           e.preventDefault();
                           e.stopPropagation();
-                          onContextMenu(e, entry.media, undefined, { fromContinue: true });
+                          const targetEpNum = isNextReleased ? nextEp : entry.progress;
+                          const targetEp: Episode = {
+                            id: `ep_${entry.media.id}_${targetEpNum}`,
+                            episodeNumber: targetEpNum,
+                            seasonNumber: 1,
+                            title: `Episode ${targetEpNum}`,
+                            synopsis: "",
+                            thumbnail: backdropUrl,
+                            durationMinutes: 24,
+                          };
+                          onContextMenu(e, entry.media, targetEp, { fromContinue: true });
                         }
                       }}
                       initial={{ opacity: 0, y: 8 }}
