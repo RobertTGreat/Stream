@@ -13,15 +13,19 @@ $Jdk = "C:\Program Files\Java\jdk-21.0.11"
 $NdkVersion = "29.0.13846066"
 $Root = Split-Path -Parent $PSScriptRoot
 $AndroidDir = Join-Path $Root "src-tauri\gen\android"
+
+$pkgJson = Get-Content (Join-Path $Root "package.json") -Raw | ConvertFrom-Json
+$Version = $pkgJson.version
+
 $SoSrc = Join-Path $Root "src-tauri\target\aarch64-linux-android\debug\libstream_lib.so"
 $SoDestDir = Join-Path $AndroidDir "app\src\main\jniLibs\arm64-v8a"
 $ApkSrc = Join-Path $AndroidDir "app\build\outputs\apk\arm64\debug\app-arm64-debug.apk"
-$ApkDest = Join-Path $Root "dist\Stream-0.1.0-arm64-debug.apk"
+$ApkDest = Join-Path $Root "dist\Stream-$Version-arm64-debug.apk"
 
 if ($Release) {
     $SoSrc = Join-Path $Root "src-tauri\target\aarch64-linux-android\release\libstream_lib.so"
     $ApkSrc = Join-Path $AndroidDir "app\build\outputs\apk\arm64\release\app-arm64-release.apk"
-    $ApkDest = Join-Path $Root "dist\Stream-0.1.0-arm64-release.apk"
+    $ApkDest = Join-Path $Root "dist\Stream-$Version-arm64.apk"
 }
 
 if (-not (Test-Path $Jdk)) { throw "JDK not found at $Jdk" }
