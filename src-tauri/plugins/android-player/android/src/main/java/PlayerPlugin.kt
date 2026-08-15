@@ -17,9 +17,13 @@ import android.widget.FrameLayout
 import androidx.core.view.WindowCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.media3.common.AudioAttributes
+import androidx.media3.common.C
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
+import androidx.media3.common.Tracks
+import androidx.media3.exoplayer.DefaultRenderersFactory
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.ui.PlayerView
 import app.tauri.annotation.Command
@@ -226,12 +230,31 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
 
     private fun ensurePlayer() {
         if (player != null) return
-        val created = ExoPlayer.Builder(activity).build()
+        val audioAttributes = AudioAttributes.Builder()
+            .setUsage(C.USAGE_MEDIA)
+            .setContentType(C.AUDIO_CONTENT_TYPE_MOVIE)
+            .build()
+
+        val renderersFactory = DefaultRenderersFactory(activity)
+            .setExtensionRendererMode(DefaultRenderersFactory.EXTENSION_RENDERER_MODE_ON)
+
+        val created = ExoPlayer.Builder(activity, renderersFactory)
+            .setAudioAttributes(audioAttributes, true)
+            .build()
+        created.volume = 1.0f
         created.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 lastError = error.errorCodeName + ": " + (error.message ?: "playback error")
                 Log.e(TAG, "exoplayer error $lastError", error)
                 trigger("player-error", JSObject().put("message", lastError))
+            }
+
+            override fun onTracksChanged(tracks: Tracks) {
+                Log.i(TAG, "tracks changed: total groups = ${tracks.groups.size}")
+                for (group in tracks.groups) {
+                    val trackType = group.type
+                    Log.i(TAG, "Track group type=$trackType isSelected=${group.isSelected}")
+                }
             }
 
             override fun onPlaybackStateChanged(playbackState: Int) {
