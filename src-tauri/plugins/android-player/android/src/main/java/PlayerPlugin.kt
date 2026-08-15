@@ -267,6 +267,7 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
         player = created
     }
 
+    @androidx.annotation.OptIn(androidx.media3.common.util.UnstableApi::class)
     private fun showDialog() {
         val existing = dialog
         if (existing?.isShowing == true) {
@@ -278,6 +279,8 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
             useController = true
             setShowNextButton(false)
             setShowPreviousButton(false)
+            setShowSubtitleButton(true)
+            setShowBuffering(PlayerView.SHOW_BUFFERING_ALWAYS)
             setBackgroundColor(Color.BLACK)
             player = this@PlayerPlugin.player
             layoutParams = FrameLayout.LayoutParams(
