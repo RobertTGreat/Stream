@@ -230,8 +230,13 @@ pub struct HealthCheckResult {
 }
 
 #[tauri::command(rename_all = "snake_case")]
-fn android_player_play_cmd(app: tauri::AppHandle, url: String, start_at: Option<f64>) -> Result<(), String> {
-    app.android_player().play(url, start_at)
+fn android_player_play_cmd(
+    app: tauri::AppHandle,
+    url: String,
+    start_at: Option<f64>,
+    default_subtitles: Option<String>,
+) -> Result<(), String> {
+    app.android_player().play(url, start_at, default_subtitles)
 }
 
 #[tauri::command]

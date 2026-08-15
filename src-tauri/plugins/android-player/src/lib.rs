@@ -30,7 +30,12 @@ pub struct PlayerState {
 }
 
 impl<R: Runtime> AndroidPlayer<R> {
-    pub fn play(&self, url: String, start_at: Option<f64>) -> Result<(), String> {
+    pub fn play(
+        &self,
+        url: String,
+        start_at: Option<f64>,
+        default_subtitles: Option<String>,
+    ) -> Result<(), String> {
         #[cfg(target_os = "android")]
         {
             #[derive(serde::Serialize)]
@@ -38,14 +43,22 @@ impl<R: Runtime> AndroidPlayer<R> {
             struct Args {
                 url: String,
                 start_at: Option<f64>,
+                default_subtitles: Option<String>,
             }
             self.handle
-                .run_mobile_plugin("play", Args { url, start_at })
+                .run_mobile_plugin(
+                    "play",
+                    Args {
+                        url,
+                        start_at,
+                        default_subtitles,
+                    },
+                )
                 .map_err(|e| e.to_string())
         }
         #[cfg(not(target_os = "android"))]
         {
-            let _ = (url, start_at);
+            let _ = (url, start_at, default_subtitles);
             Err("Android player is only available on Android".into())
         }
     }

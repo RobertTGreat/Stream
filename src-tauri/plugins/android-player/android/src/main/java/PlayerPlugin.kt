@@ -33,6 +33,7 @@ import app.tauri.plugin.Plugin
 class PlayArgs {
     lateinit var url: String
     var startAt: Double? = null
+    var defaultSubtitles: String? = null
 }
 
 @InvokeArg
@@ -118,6 +119,7 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
                     (exo.isPlaying || exo.playbackState == Player.STATE_BUFFERING || exo.playbackState == Player.STATE_READY)
                 if (!alreadyPlayingSame) {
                     currentUrl = args.url
+                    configureSubtitles(exo, args.defaultSubtitles)
                     exo.setMediaItem(MediaItem.fromUri(Uri.parse(args.url)))
                     exo.prepare()
                     val startAt = args.startAt ?: 0.0
@@ -335,6 +337,24 @@ class PlayerPlugin(private val activity: Activity) : Plugin(activity) {
         } else {
             restoreOrientation()
         }
+    }
+
+    private fun configureSubtitles(exo: ExoPlayer, defaultSubtitles: String?) {
+        val pref = defaultSubtitles?.trim()?.lowercase()
+        val lang = when (pref) {
+            "english", "en", "eng" -> "eng"
+            "japanese", "ja", "jpn", "jp" -> "jpn"
+            "spanish", "es", "spa" -> "spa"
+            "french", "fr", "fre", "fra" -> "fra"
+            "german", "de", "ger", "deu" -> "deu"
+            null, "" -> "eng"
+            else -> pref
+        }
+        exo.trackSelectionParameters = exo.trackSelectionParameters
+            .buildUpon()
+            .setPreferredTextLanguage(lang)
+            .setSelectUndeterminedTextLanguage(true)
+            .build()
     }
 
     companion object {

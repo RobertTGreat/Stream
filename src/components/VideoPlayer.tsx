@@ -475,6 +475,7 @@ export function VideoPlayer({
           await invokeTauri("android_player_play_cmd", {
             url: streamUrl,
             start_at: resumeAt,
+            default_subtitles: defaultSubtitles,
           });
           if (cancelled) return;
           setHtmlActive(true);
