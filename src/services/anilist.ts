@@ -986,6 +986,19 @@ export class AniListService {
     }
   }
 
+  static async syncListStatus(media: Pick<MediaItem, "anilistId" | "episodesCount" | "mediaType">, status: "CURRENT" | "COMPLETED" | "PAUSED" | "DROPPED" | "PLANNING"): Promise<boolean> {
+    if (!media.anilistId) return false;
+    const episodeNumber =
+      status === "COMPLETED"
+        ? media.episodesCount || (media.mediaType === "movie" ? 1 : 1)
+        : 0;
+    return this.updateAniListProgress({
+      anilistId: media.anilistId,
+      episodeNumber,
+      status,
+    });
+  }
+
   private static formatAniListMedia(m: any): MediaItem {
     const title = m.title?.english || m.title?.romaji || m.title?.native || "Unknown Anime";
     const studios = m.studios?.nodes?.map((s: any) => s.name).join(", ") || "Studio";

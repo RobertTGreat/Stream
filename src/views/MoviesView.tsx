@@ -14,6 +14,7 @@ interface MoviesViewProps {
   favorites: string[];
   onToggleFavorite: (id: string) => void;
   onToggleWatchlist?: (id: string) => void;
+  onMarkWatched?: (item: MediaItem, watched: boolean) => void;
   onSearch: (query: string, genre?: string, sort?: string) => void;
   onContextMenu?: (e: React.MouseEvent, media: MediaItem) => void;
 }
@@ -36,6 +37,7 @@ export function MoviesView({
   favorites,
   onToggleFavorite,
   onToggleWatchlist,
+  onMarkWatched,
   onSearch,
   onContextMenu,
 }: MoviesViewProps) {
@@ -43,7 +45,7 @@ export function MoviesView({
   const [selectedSort, setSelectedSort] = useState<"trending" | "popular" | "top_rated" | "upcoming">("trending");
   const [searchQuery, setSearchQuery] = useState("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const { containerRef, displayItems } = useFullRowsItems(items, 170, 16);
+  const { containerRef, displayItems } = useFullRowsItems(items, 118, 10);
 
   const handleSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
     const val = e.target.value;
@@ -144,6 +146,7 @@ export function MoviesView({
               isFavorite={favorites.includes(item.id)}
               onToggleFavorite={onToggleFavorite}
               onToggleWatchlist={onToggleWatchlist}
+              onMarkWatched={onMarkWatched}
               onContextMenu={onContextMenu}
             />
           ))}

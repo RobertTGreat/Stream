@@ -17,6 +17,7 @@ struct YtsData {
 struct YtsMovie {
     title_long: Option<String>,
     title: Option<String>,
+    year: Option<u32>,
     torrents: Option<Vec<YtsTorrent>>,
 }
 
@@ -35,10 +36,15 @@ struct YtsTorrent {
 pub async fn fetch(
     client: &Client,
     query: &str,
+    imdb_id: Option<&str>,
+    year: Option<u32>,
 ) -> Result<Vec<TorrentSearchResult>, Box<dyn std::error::Error>> {
+    let term = imdb_id
+        .filter(|id| id.starts_with("tt"))
+        .unwrap_or(query);
     let url = format!(
         "https://yts.mx/api/v2/list_movies.json?query_term={}&limit=20&sort_by=seeds",
-        urlencoding::encode(query)
+        urlencoding::encode(term)
     );
     let res = client.get(&url).send().await?;
     if !res.status().is_success() {
@@ -52,6 +58,11 @@ pub async fn fetch(
             .title_long
             .or(movie.title)
             .unwrap_or_else(|| query.to_string());
+        if let Some(year) = year {
+            if movie.year != Some(year) && !movie_title.contains(&year.to_string()) {
+                continue;
+            }
+        }
         for torrent in movie.torrents.unwrap_or_default() {
             let Some(hash) = torrent.hash.filter(|h| !h.is_empty()) else {
                 continue;

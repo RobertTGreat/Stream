@@ -44,17 +44,36 @@ export function resolvePlayEpisode(
   };
 }
 
+export function westernSearchQuery(media: MediaItem, episode?: Episode): string {
+  const title = media.title.trim();
+  if (media.mediaType === "movie") {
+    return media.year ? `${title} ${media.year}` : title;
+  }
+  if (episode?.episodeNumber) {
+    const season = String(episode.seasonNumber || 1).padStart(2, "0");
+    const ep = String(episode.episodeNumber).padStart(2, "0");
+    return `${title} S${season}E${ep}`;
+  }
+  return title;
+}
+
 export function buildSearchInvokeArgs(
   media: MediaItem,
   episode: Episode | undefined,
   settings: AppSettings
 ): Record<string, unknown> {
+  const isMovie = media.mediaType === "movie";
+  const isAnime = media.mediaType === "anime";
   return {
-    query: media.title,
+    query: isAnime ? media.title : westernSearchQuery(media, episode),
+    title: media.title,
     media_type: media.mediaType,
     anilist_id: media.anilistId || undefined,
-    season: episode?.seasonNumber || (media.mediaType === "movie" ? undefined : 1),
-    episode: media.mediaType === "movie" ? undefined : episode?.episodeNumber,
+    tmdb_id: media.tmdbId || undefined,
+    imdb_id: media.imdbId || undefined,
+    year: media.year || undefined,
+    season: isMovie ? undefined : episode?.seasonNumber || 1,
+    episode: isMovie ? undefined : episode?.episodeNumber,
     enable_nyaa: settings.enableNyaa,
     enable_animetosho: settings.enableAnimeTosho,
     enable_seadex: settings.enableSeaDex,

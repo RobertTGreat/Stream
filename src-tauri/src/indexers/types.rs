@@ -20,6 +20,10 @@ pub struct TorrentSearchResult {
 
 #[derive(Debug, Clone)]
 pub struct SearchOptions {
+    pub title: Option<String>,
+    pub tmdb_id: Option<u64>,
+    pub imdb_id: Option<String>,
+    pub year: Option<u32>,
     pub season: Option<u32>,
     pub episode: Option<u32>,
     pub enable_nyaa: bool,
@@ -43,6 +47,10 @@ pub struct SearchOptions {
 impl Default for SearchOptions {
     fn default() -> Self {
         Self {
+            title: None,
+            tmdb_id: None,
+            imdb_id: None,
+            year: None,
             season: None,
             episode: None,
             enable_nyaa: true,

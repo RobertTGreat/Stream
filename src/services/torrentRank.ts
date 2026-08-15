@@ -1,4 +1,4 @@
-import { PreferredQuality, TorrentResult } from "../types";
+import { MediaType, PreferredQuality, TorrentResult } from "../types";
 import { isValidMagnet, looksLikeEpisodeRelease } from "./playback";
 
 const QUALITY_ORDER: Record<string, number> = {
@@ -32,20 +32,38 @@ function preferredTier(pref: PreferredQuality): number {
  * Score a torrent for Easy Watch auto-select.
  * Higher is better. Factors: SeaDex/best flag, seeders, quality match, size sanity.
  */
+export interface RankOptions {
+  mediaType?: MediaType;
+  season?: number;
+  year?: number;
+}
+
+function looksLikeSeasonEpisode(title: string): boolean {
+  return /s\d{1,2}e\d{1,2}/i.test(title);
+}
+
 export function scoreTorrent(
   t: TorrentResult,
   preferredQuality: PreferredQuality,
   minSeeders: number,
-  episode?: number
+  episode?: number,
+  opts: RankOptions = {}
 ): number {
   if (!isValidMagnet(t.magnet_url)) return -1;
   if (minSeeders > 0 && t.seeders < minSeeders && !t.is_best_release) return -1;
 
   let score = 0;
+  const source = (t.source_name || "").toLowerCase();
+  const title = t.title || "";
 
   if (t.is_best_release) score += 2_400;
-  if ((t.source_name || "").toLowerCase().includes("seadex")) score += 1_200;
-  if (looksLikeEpisodeRelease(t.title, episode)) score += 1_600;
+  if (source.includes("seadex")) score += 1_200;
+  if (opts.mediaType === "movie" && (source.includes("yts") || source.includes("torrentio"))) score += 500;
+  if (opts.mediaType === "tv" && (source.includes("torrentio") || source.includes("eztv"))) score += 400;
+  if (opts.mediaType === "movie" && looksLikeSeasonEpisode(title)) score -= 1_200;
+  if (opts.mediaType === "movie" && opts.year && title.includes(String(opts.year))) score += 450;
+  if (opts.mediaType !== "movie" && looksLikeEpisodeRelease(title, episode)) score += 1_600;
+  if (opts.mediaType === "tv" && opts.season && new RegExp(`s0*${opts.season}e`, "i").test(title)) score += 250;
 
   // Seeders (log-ish to avoid huge packs dominating purely by seed count)
   score += Math.min(t.seeders, 500) * 12;
@@ -84,7 +102,8 @@ export function selectBestTorrent(
   torrents: TorrentResult[],
   preferredQuality: PreferredQuality = "1080p",
   minSeeders = 1,
-  episode?: number
+  episode?: number,
+  opts: RankOptions = {}
 ): TorrentResult | null {
   if (!torrents.length) return null;
 
@@ -92,7 +111,7 @@ export function selectBestTorrent(
   let bestScore = -Infinity;
 
   for (const t of torrents) {
-    const s = scoreTorrent(t, preferredQuality, minSeeders, episode);
+    const s = scoreTorrent(t, preferredQuality, minSeeders, episode, opts);
     if (s < 0) continue;
     if (s > bestScore) {
       bestScore = s;
@@ -101,7 +120,7 @@ export function selectBestTorrent(
   }
 
   if (!best && minSeeders > 0) {
-    return selectBestTorrent(torrents, preferredQuality, 0, episode);
+    return selectBestTorrent(torrents, preferredQuality, 0, episode, opts);
   }
 
   return best;

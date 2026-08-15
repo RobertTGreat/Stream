@@ -11,6 +11,7 @@ interface HeroBannerProps {
   onPlay: (item: MediaItem) => void;
   watchlist: string[];
   onToggleWatchlist: (id: string) => void;
+  onMarkWatched?: (item: MediaItem, watched: boolean) => void;
   onRefresh?: () => void;
 }
 
@@ -20,6 +21,7 @@ export function HeroBanner({
   onPlay,
   watchlist: _watchlist,
   onToggleWatchlist,
+  onMarkWatched,
 }: HeroBannerProps) {
   const [currentIndex, setCurrentIndex] = useState(0);
 
@@ -99,6 +101,7 @@ export function HeroBanner({
             mediaType={item.mediaType}
             coverImage={item.coverImage}
             onToggleWatchlist={onToggleWatchlist}
+            onMarkWatched={onMarkWatched}
             buttonClassName="home-hero-icon"
           />
         </div>

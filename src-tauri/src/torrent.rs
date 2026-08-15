@@ -6,8 +6,10 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use librqbit::api::{Api, ApiTorrentListOpts, TorrentDetailsResponse, TorrentIdOrHash};
+use librqbit::dht::PersistentDhtConfig;
 use librqbit::http_api::HttpApi;
-use librqbit::{AddTorrent, AddTorrentOptions, Session, TorrentStats, TorrentStatsState};
+use librqbit::PeerConnectionOptions;
+use librqbit::{AddTorrent, AddTorrentOptions, Session, SessionOptions, TorrentStats, TorrentStatsState};
 
 const VIDEO_EXTENSIONS: &[&str] = &[
     "mkv", "mp4", "avi", "webm", "mov", "m4v", "flv", "ts", "wmv", "vob", "ogm", "mpg", "mpeg",
@@ -74,6 +76,7 @@ pub struct TorrentAddResult {
 #[derive(Clone)]
 struct TaskMeta {
     title: String,
+    display_title: String,
     media_type: String,
     magnet_link: String,
     seeders: u32,
@@ -86,6 +89,7 @@ struct TaskMeta {
 pub struct StreamEngine {
     api: Api,
     http_port: u16,
+    default_dir: PathBuf,
     meta: Arc<Mutex<HashMap<usize, TaskMeta>>>,
     max_concurrent: Arc<Mutex<u32>>,
 }
@@ -109,6 +113,23 @@ const PUBLIC_TRACKERS: &[&str] = &[
     "https://tracker.tamersrealm.org:443/announce",
 ];
 
+fn is_android_unwritable_path(path: &str) -> bool {
+    let trimmed = path.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    if trimmed.starts_with('~') {
+        return true;
+    }
+    if trimmed.len() >= 2 && trimmed.as_bytes()[1] == b':' {
+        return true;
+    }
+    if trimmed.starts_with('/') && !trimmed.starts_with("/data/") && !trimmed.starts_with("/storage/") {
+        return true;
+    }
+    false
+}
+
 fn append_trackers_to_magnet(magnet: &str) -> String {
     let mut result = magnet.to_string();
     for tr in PUBLIC_TRACKERS {
@@ -120,15 +141,69 @@ fn append_trackers_to_magnet(magnet: &str) -> String {
     result
 }
 
+fn stream_add_opts(output_folder: String, only_files: Option<Vec<usize>>) -> AddTorrentOptions {
+    AddTorrentOptions {
+        overwrite: true,
+        output_folder: Some(output_folder),
+        only_files,
+        peer_opts: Some(PeerConnectionOptions {
+            connect_timeout: Some(Duration::from_secs(4)),
+            read_write_timeout: Some(Duration::from_secs(8)),
+            keep_alive_interval: Some(Duration::from_secs(15)),
+        }),
+        force_tracker_interval: Some(Duration::from_secs(20)),
+        defer_writes: Some(true),
+        trackers: Some(PUBLIC_TRACKERS.iter().map(|t| t.to_string()).collect()),
+        ..Default::default()
+    }
+}
+
 impl StreamEngine {
     pub async fn new(download_dir: PathBuf) -> anyhow::Result<Self> {
         let _ = std::fs::create_dir_all(&download_dir);
-        let session_opts = librqbit::SessionOptions {
+        let dht_path = download_dir.join("dht.json");
+        let session_opts = SessionOptions {
             fastresume: true,
-            concurrent_init_limit: Some(128),
+            concurrent_init_limit: Some(8),
+            listen_port_range: Some(42442..42462),
+            enable_upnp_port_forwarding: cfg!(not(target_os = "android")),
+            defer_writes_up_to: Some(32),
+            peer_opts: Some(PeerConnectionOptions {
+                connect_timeout: Some(Duration::from_secs(4)),
+                read_write_timeout: Some(Duration::from_secs(8)),
+                keep_alive_interval: Some(Duration::from_secs(15)),
+            }),
+            dht_config: Some(PersistentDhtConfig {
+                dump_interval: Some(Duration::from_secs(60)),
+                config_filename: Some(dht_path),
+            }),
             ..Default::default()
         };
-        let session = Session::new_with_opts(download_dir, session_opts).await?;
+        let session = match Session::new_with_opts(download_dir.clone(), session_opts).await {
+            Ok(session) => session,
+            Err(error) => {
+                eprintln!("torrent session init failed ({error:#}); retrying without DHT");
+                Session::new_with_opts(
+                    download_dir.clone(),
+                    SessionOptions {
+                        fastresume: true,
+                        concurrent_init_limit: Some(8),
+                        listen_port_range: Some(42442..42462),
+                        enable_upnp_port_forwarding: false,
+                        defer_writes_up_to: Some(32),
+                        peer_opts: Some(PeerConnectionOptions {
+                            connect_timeout: Some(Duration::from_secs(4)),
+                            read_write_timeout: Some(Duration::from_secs(8)),
+                            keep_alive_interval: Some(Duration::from_secs(15)),
+                        }),
+                        disable_dht: true,
+                        disable_dht_persistence: true,
+                        ..Default::default()
+                    },
+                )
+                .await?
+            }
+        };
         let api = Api::new(session, None, None);
 
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -140,9 +215,34 @@ impl StreamEngine {
         Ok(Self {
             api,
             http_port,
+            default_dir: download_dir,
             meta: Arc::new(Mutex::new(HashMap::new())),
             max_concurrent: Arc::new(Mutex::new(3)),
         })
+    }
+
+    fn resolve_save_path(&self, requested: &str) -> String {
+        #[cfg(target_os = "android")]
+        {
+            let fallback = self.default_dir.to_string_lossy().to_string();
+            if is_android_unwritable_path(requested) {
+                let _ = std::fs::create_dir_all(&self.default_dir);
+                return fallback;
+            }
+            if std::fs::create_dir_all(requested).is_err() {
+                let _ = std::fs::create_dir_all(&self.default_dir);
+                return fallback;
+            }
+            return requested.to_string();
+        }
+        #[cfg(not(target_os = "android"))]
+        {
+            let _ = requested;
+            if requested.trim().is_empty() {
+                return self.default_dir.to_string_lossy().to_string();
+            }
+            requested.to_string()
+        }
     }
 
     pub fn configure(&self, max_concurrent: Option<u32>, speed_limit_mbps: Option<f64>) {
@@ -205,12 +305,9 @@ impl StreamEngine {
         media_type: String,
         save_path: String,
     ) -> Result<TorrentAddResult, String> {
+        let save_path = self.resolve_save_path(&save_path);
         let augmented_magnet = append_trackers_to_magnet(&magnet_link);
-        let opts = AddTorrentOptions {
-            overwrite: true,
-            output_folder: Some(save_path.clone()),
-            ..Default::default()
-        };
+        let opts = stream_add_opts(save_path.clone(), None);
 
         let add = AddTorrent::from_url(augmented_magnet.as_str());
         let resp = self
@@ -231,6 +328,7 @@ impl StreamEngine {
             id,
             TaskMeta {
                 title: torrent_name.clone(),
+                display_title: title,
                 media_type,
                 magnet_link: augmented_magnet,
                 seeders: 0,
@@ -265,12 +363,10 @@ impl StreamEngine {
             return Err("Invalid magnet link (missing a valid info hash).".to_string());
         }
 
+        let save_path = self.resolve_save_path(&save_path);
         let augmented_magnet = append_trackers_to_magnet(&magnet_link);
-        let opts = AddTorrentOptions {
-            overwrite: true,
-            output_folder: Some(save_path.clone()),
-            ..Default::default()
-        };
+        let hinted_file = file_index.map(|f| f as usize);
+        let opts = stream_add_opts(save_path.clone(), hinted_file.map(|idx| vec![idx]));
 
         let add = AddTorrent::from_url(augmented_magnet.as_str());
         let resp = self
@@ -282,7 +378,7 @@ impl StreamEngine {
         let id = resp
             .id
             .ok_or_else(|| "Torrent metadata loaded but no session id was returned.".to_string())?;
-        self.wait_until_streamable(id).await?;
+        self.wait_until_initialized(id).await?;
 
         let files = extract_torrent_files(resp.details.files.as_deref().unwrap_or(&[]));
         let video_files: Vec<&TorrentFileItem> = files.iter().filter(|f| f.is_video).collect();
@@ -295,8 +391,11 @@ impl StreamEngine {
             .filter(|f| *f < files.len() && files[*f].is_video)
             .or_else(|| pick_episode_file(&files, season, episode))
             .or_else(|| {
-                if video_files.len() == 1 {
-                    Some(video_files[0].index)
+                if video_files.len() == 1 || media_type == "movie" || episode.is_none() {
+                    video_files
+                        .iter()
+                        .max_by_key(|f| f.length)
+                        .map(|f| f.index)
                 } else {
                     None
                 }
@@ -320,6 +419,7 @@ impl StreamEngine {
                 id,
                 TaskMeta {
                     title: torrent_title.clone(),
+                    display_title: title.clone(),
                     media_type,
                     magnet_link: augmented_magnet,
                     seeders: 0,
@@ -346,6 +446,7 @@ impl StreamEngine {
             id,
             TaskMeta {
                 title: torrent_title.clone(),
+                display_title: title,
                 media_type,
                 magnet_link: augmented_magnet,
                 seeders: 0,
@@ -368,34 +469,19 @@ impl StreamEngine {
         })
     }
 
-    async fn wait_until_streamable(&self, id: usize) -> Result<(), String> {
+    async fn wait_until_initialized(&self, id: usize) -> Result<(), String> {
         let tid = TorrentIdOrHash::parse(&id.to_string()).map_err(|e| e.to_string())?;
         let handle = self.api.mgr_handle(tid).map_err(|e| e.to_string())?;
-        tokio::time::timeout(Duration::from_secs(90), handle.wait_until_initialized())
+        tokio::time::timeout(Duration::from_secs(45), handle.wait_until_initialized())
             .await
             .map_err(|_| {
-                "Timed out waiting for the torrent to finish initializing. Try again in a moment."
+                "Timed out waiting for torrent metadata. Try another release."
                     .to_string()
             })?
             .map_err(|e| format!("Torrent failed to initialize: {e:#}"))?;
 
         if handle.live().is_none() {
             let _ = self.api.api_torrent_action_start(tid).await;
-            let started = tokio::time::timeout(Duration::from_secs(20), async {
-                loop {
-                    if handle.live().is_some() {
-                        return;
-                    }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-            })
-            .await;
-            if started.is_err() && handle.live().is_none() {
-                return Err(
-                    "Torrent initialized but did not go live. It may be paused or errored."
-                        .to_string(),
-                );
-            }
         }
         Ok(())
     }
@@ -410,6 +496,7 @@ impl StreamEngine {
         seeders: u32,
         peers: u32,
     ) -> Result<DownloadTask, String> {
+        let save_path = self.resolve_save_path(&save_path);
         let opts = AddTorrentOptions {
             overwrite: true,
             output_folder: Some(save_path.clone()),
@@ -430,7 +517,8 @@ impl StreamEngine {
         self.meta.lock().unwrap().insert(
             id,
             TaskMeta {
-                title,
+                title: title.clone(),
+                display_title: title,
                 media_type,
                 magnet_link,
                 seeders,
@@ -538,7 +626,11 @@ impl StreamEngine {
 
         DownloadTask {
             id: t.id.map(|id| id.to_string()).unwrap_or_default(),
-            title: m.title.clone(),
+            title: if m.display_title.trim().is_empty() {
+                m.title.clone()
+            } else {
+                m.display_title.clone()
+            },
             media_type: m.media_type.clone(),
             magnet_link: m.magnet_link.clone(),
             save_path: t.output_folder.clone(),
@@ -648,6 +740,9 @@ fn pick_episode_file(
             if name.contains(&format!("s{padded_season}e{padded_ep}"))
                 || name.contains(&format!("s{season}e{episode}"))
                 || name.contains(&format!("s{padded_season}e{episode}"))
+                || name.contains(&format!("s{padded_season}.e{padded_ep}"))
+                || name.contains(&format!("{season}x{padded_ep}"))
+                || name.contains(&format!("{season}x{episode}"))
             {
                 score += 100;
             }
@@ -672,4 +767,37 @@ fn pick_episode_file(
         return scored.first().map(|s| s.1);
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn video(index: usize, name: &str, length: u64) -> TorrentFileItem {
+        TorrentFileItem {
+            index,
+            name: name.to_string(),
+            length,
+            is_video: true,
+        }
+    }
+
+    #[test]
+    fn picks_sxxexx_over_generic_number() {
+        let files = vec![
+            video(0, "Show.S01E02.1080p.mkv", 1_000),
+            video(1, "Show.S01E03.1080p.mkv", 1_000),
+            video(2, "extras-02.mkv", 200),
+        ];
+        assert_eq!(pick_episode_file(&files, Some(1), Some(3)), Some(1));
+    }
+
+    #[test]
+    fn picks_1x02_style_names() {
+        let files = vec![
+            video(0, "Show.1x01.mkv", 1_000),
+            video(1, "Show.1x02.mkv", 1_000),
+        ];
+        assert_eq!(pick_episode_file(&files, Some(1), Some(2)), Some(1));
+    }
 }

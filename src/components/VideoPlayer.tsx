@@ -22,7 +22,20 @@ import { DownloadTask, Episode, MediaItem, MpvTrack, StreamProgress } from "../t
 import { StorageService } from "../services/storage";
 import { AniListService } from "../services/anilist";
 import { invokeTauri, setDiscordActivity, clearDiscordActivity } from "../services/tauri";
+
+async function listenAndroidPlayerClosed(onClosed: () => void): Promise<() => void> {
+  try {
+    const { addPluginListener } = await import("@tauri-apps/api/core");
+    const listener = await addPluginListener("android-player", "player-closed", () => onClosed());
+    return () => {
+      void listener.unregister();
+    };
+  } catch {
+    return () => undefined;
+  }
+}
 import { AniSkipService, SkipInterval } from "../services/aniskip";
+import { isAndroid } from "../utils/platform";
 
 interface VideoPlayerProps {
   media: MediaItem;
@@ -101,6 +114,8 @@ export function VideoPlayer({
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [playbackError, setPlaybackError] = useState<string | null>(initialError || null);
   const [mpvActive, setMpvActive] = useState(false);
+  const [htmlActive, setHtmlActive] = useState(false);
+  const useAndroidPlayer = isAndroid();
   const [tracks, setTracks] = useState<MpvTrack[]>([]);
   const [skipIntervals, setSkipIntervals] = useState<SkipInterval[]>([]);
   const [activeSkip, setActiveSkip] = useState<SkipInterval | null>(null);
@@ -250,12 +265,17 @@ export function VideoPlayer({
     isStoppingRef.current = true;
     clearPoll();
     setMpvActive(false);
+    setHtmlActive(false);
     try {
-      await invokeTauri("mpv_stop_cmd", {});
+      if (useAndroidPlayer) {
+        await invokeTauri("android_player_stop_cmd", {});
+      } else {
+        await invokeTauri("mpv_stop_cmd", {});
+      }
     } catch {
       // session already gone
     }
-  }, [clearPoll]);
+  }, [clearPoll, useAndroidPlayer]);
 
   const handleClose = useCallback(() => {
     clearPoll();
@@ -445,11 +465,85 @@ export function VideoPlayer({
     if (!streamUrl || initialError) {
       return undefined;
     }
+    if (useAndroidPlayer) {
+      let cancelled = false;
+      const resumeAt = startAt > 5 ? startAt : undefined;
+      setPlaybackError(null);
+      setIsBuffering(true);
+      void (async () => {
+        try {
+          await invokeTauri("android_player_play_cmd", {
+            url: streamUrl,
+            start_at: resumeAt,
+          });
+          if (cancelled) return;
+          setHtmlActive(true);
+          setIsBuffering(false);
+        } catch (err) {
+          if (!cancelled) {
+            setHtmlActive(false);
+            setIsBuffering(false);
+            setPlaybackError(`Could not start Android player: ${err}`);
+          }
+        }
+      })();
+
+      let sawReady = false;
+      const poll = window.setInterval(async () => {
+        if (cancelled) return;
+        try {
+          const state = await invokeTauri<{
+            ready: boolean;
+            playing: boolean;
+            paused: boolean;
+            position: number;
+            duration: number;
+            ended: boolean;
+            buffering: boolean;
+            closed?: boolean;
+            error?: string | null;
+          }>("android_player_get_state_cmd", {});
+          if (cancelled) return;
+          if (state.ready) sawReady = true;
+          if (typeof state.position === "number") setCurrentTime(state.position);
+          if (typeof state.duration === "number" && state.duration > 0) setDuration(state.duration);
+          setPaused(Boolean(state.paused));
+          setIsBuffering(Boolean(state.buffering));
+          if (state.error) {
+            setPlaybackError(state.error);
+            setHtmlActive(false);
+          }
+          if (state.ended && !eofHandledRef.current) {
+            eofHandledRef.current = true;
+            if (autoPlayNext && media.mediaType !== "movie") {
+              onNextEpisode?.();
+            } else {
+              handleClose();
+            }
+          }
+          if (sawReady && (state.closed || !state.ready) && !isStoppingRef.current) {
+            handleClose();
+          }
+        } catch {
+          // ignore poll misses
+        }
+      }, 500);
+
+      const unlistenClosed = listenAndroidPlayerClosed(() => {
+        if (!cancelled) handleClose();
+      });
+
+      return () => {
+        cancelled = true;
+        window.clearInterval(poll);
+        void unlistenClosed.then((fn) => fn()).catch(() => undefined);
+      };
+    }
     void startMpv(streamUrl);
     return () => {
       void stopMpv();
     };
-  }, [streamUrl, initialError, startMpv, stopMpv]);
+  }, [streamUrl, initialError, useAndroidPlayer]);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
@@ -521,11 +615,12 @@ export function VideoPlayer({
   const subTracks = tracks.filter((t) => t.track_type === "sub");
 
   const resolving = !streamUrl && !playbackError;
-  const showOverlay = (resolving || isBuffering || playbackError) && !mpvActive;
+  const playerReady = useAndroidPlayer ? htmlActive : mpvActive;
+  const showOverlay = (resolving || isBuffering || playbackError) && !playerReady;
   const progressPct = duration > 0 ? Math.min(100, (currentTime / duration) * 100) : 0;
 
   return (
-    <div className={`video-player-modal ${mpvActive ? "is-playing" : "is-loading"}`}>
+    <div className={`video-player-modal ${playerReady ? "is-playing" : "is-loading"}`}>
       <div className="player-chrome">
         <div className="player-title-info">
           <h3 className="media-heading">{media.title}</h3>
@@ -541,7 +636,21 @@ export function VideoPlayer({
         </button>
       </div>
 
-      {mpvActive && !playbackError && (
+      {useAndroidPlayer && htmlActive && !playbackError && (
+        <div className="android-player-placeholder">
+          <p>Playing with Android player</p>
+          {torrentTask && (
+            <div className="torrent-live-bar">
+              <HardDriveDownload size={14} />
+              <span>{formatSpeed(torrentTask.download_speed_bps)}</span>
+              <span>{torrentTask.peers} peers</span>
+              <span>{torrentTask.progress.toFixed(1)}% cached</span>
+            </div>
+          )}
+        </div>
+      )}
+
+      {!useAndroidPlayer && mpvActive && !playbackError && (
         <div className="mpv-console">
           <div className="mpv-console-hero">
             {media.coverImage ? (

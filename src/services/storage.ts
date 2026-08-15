@@ -18,7 +18,13 @@ function isWindowsHost(): boolean {
   return /windows/i.test(navigator.userAgent || navigator.platform || "");
 }
 
+function isAndroidHost(): boolean {
+  if (typeof navigator === "undefined") return false;
+  return /android/i.test(navigator.userAgent);
+}
+
 function defaultPath(winPath: string, posixPath: string): string {
+  if (isAndroidHost()) return "app://downloads";
   return isWindowsHost() ? winPath : posixPath;
 }
 
@@ -101,8 +107,22 @@ export class StorageService {
     }
   }
 
-  /** Rewrite leftover Windows default paths when running on macOS/Linux. */
+  /** Rewrite leftover desktop paths when running on Android / macOS / Linux. */
   private static normalizeSettings(settings: AppSettings): AppSettings {
+    if (isAndroidHost()) {
+      const desktopPath = (p: string) =>
+        !p ||
+        p.startsWith("~") ||
+        /^[a-zA-Z]:[\\/]/.test(p) ||
+        (p.startsWith("/") && !p.startsWith("/data/") && !p.startsWith("/storage/"));
+      return {
+        ...settings,
+        downloadPath: desktopPath(settings.downloadPath) ? DEFAULT_SETTINGS.downloadPath : settings.downloadPath,
+        animeFolder: desktopPath(settings.animeFolder) ? DEFAULT_SETTINGS.animeFolder : settings.animeFolder,
+        moviesFolder: desktopPath(settings.moviesFolder) ? DEFAULT_SETTINGS.moviesFolder : settings.moviesFolder,
+        tvFolder: desktopPath(settings.tvFolder) ? DEFAULT_SETTINGS.tvFolder : settings.tvFolder,
+      };
+    }
     if (isWindowsHost()) return settings;
     const winAbs = (p: string) => /^[a-zA-Z]:[\\/]/.test(p || "");
     return {

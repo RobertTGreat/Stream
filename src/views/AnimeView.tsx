@@ -14,6 +14,7 @@ interface AnimeViewProps {
   favorites: string[];
   onToggleFavorite: (id: string) => void;
   onToggleWatchlist?: (id: string) => void;
+  onMarkWatched?: (item: MediaItem, watched: boolean) => void;
   onSearch: (query: string, genre?: string, sort?: string) => void;
   onContextMenu?: (e: React.MouseEvent, media: MediaItem) => void;
 }
@@ -36,6 +37,7 @@ export function AnimeView({
   favorites,
   onToggleFavorite,
   onToggleWatchlist,
+  onMarkWatched,
   onSearch,
   onContextMenu,
 }: AnimeViewProps) {
@@ -43,7 +45,7 @@ export function AnimeView({
   const [selectedSort, setSelectedSort] = useState<"TRENDING_DESC" | "POPULARITY_DESC" | "SCORE_DESC" | "START_DATE_DESC">("TRENDING_DESC");
   const [searchQuery, setSearchQuery] = useState("");
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const { containerRef, displayItems } = useFullRowsItems(items, 170, 16);
+  const { containerRef, displayItems } = useFullRowsItems(items, 118, 10);
 
   const handleGenreClick = (genre: string) => {
     setSelectedGenre(genre);
@@ -144,6 +146,7 @@ export function AnimeView({
               isFavorite={favorites.includes(item.id)}
               onToggleFavorite={onToggleFavorite}
               onToggleWatchlist={onToggleWatchlist}
+              onMarkWatched={onMarkWatched}
               onContextMenu={onContextMenu}
             />
           ))}

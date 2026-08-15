@@ -2,6 +2,7 @@ import { useState } from "react";
 import { Plus, Heart, Bookmark, CheckCircle2 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 import { StorageService } from "../services/storage";
+import { MediaItem } from "../types";
 
 interface QuickActionPlusMenuProps {
   mediaId: string;
@@ -11,6 +12,7 @@ interface QuickActionPlusMenuProps {
   isFavorite?: boolean;
   onToggleFavorite?: (id: string) => void;
   onToggleWatchlist?: (id: string) => void;
+  onMarkWatched?: (item: MediaItem, watched: boolean) => void;
   className?: string;
   buttonClassName?: string;
 }
@@ -23,6 +25,7 @@ export function QuickActionPlusMenu({
   isFavorite: isFavProp,
   onToggleFavorite,
   onToggleWatchlist,
+  onMarkWatched,
   className = "",
   buttonClassName = "",
 }: QuickActionPlusMenuProps) {
@@ -55,24 +58,25 @@ export function QuickActionPlusMenu({
 
   const handleToggleWatched = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (isWatched) {
-      StorageService.removeWatchProgress(mediaId);
-      setIsWatched(false);
+    const next = !isWatched;
+    const cached = StorageService.getMediaCache()[mediaId];
+    const item: MediaItem = cached || {
+      id: mediaId,
+      title: mediaTitle,
+      mediaType,
+      coverImage: coverImage || "",
+      synopsis: "",
+      genres: [],
+    };
+    StorageService.cacheMedia(item);
+    if (onMarkWatched) {
+      onMarkWatched(item, next);
+    } else if (next) {
+      StorageService.markSeriesWatched(item);
     } else {
-      StorageService.saveWatchProgress({
-        mediaId,
-        mediaTitle,
-        mediaType,
-        coverImage: coverImage || "",
-        episodeNumber: 1,
-        currentTime: 1200,
-        duration: 1200,
-        percentage: 100,
-        completed: true,
-        lastUpdated: Date.now(),
-      });
-      setIsWatched(true);
+      StorageService.removeSeriesProgress(mediaId);
     }
+    setIsWatched(next);
   };
 
   return (

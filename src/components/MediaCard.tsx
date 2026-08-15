@@ -16,6 +16,7 @@ interface MediaCardProps {
   inWatchlist?: boolean;
   onToggleWatchlist?: (id: string) => void;
   isWatched?: boolean;
+  onMarkWatched?: (item: MediaItem, watched: boolean) => void;
   onContextMenu?: (e: React.MouseEvent, item: MediaItem) => void;
   /** Stagger index for entrance (Continue-style spring). */
   index?: number;
@@ -32,6 +33,7 @@ function MediaCardBase({
   inWatchlist: inWatchlistProp,
   onToggleWatchlist,
   isWatched: isWatchedProp,
+  onMarkWatched,
   onContextMenu,
   index = 0,
   animated = true,
@@ -99,13 +101,16 @@ function MediaCardBase({
 
   const handleToggleWatched = (e: React.MouseEvent) => {
     e.stopPropagation();
-    if (isWatched) {
-      StorageService.removeSeriesProgress(item.id);
-      setLocalWatched(false);
-    } else {
+    StorageService.cacheMedia(item);
+    const next = !isWatched;
+    if (onMarkWatched) {
+      onMarkWatched(item, next);
+    } else if (next) {
       StorageService.markSeriesWatched(item);
-      setLocalWatched(true);
+    } else {
+      StorageService.removeSeriesProgress(item.id);
     }
+    setLocalWatched(next);
   };
 
   const handleRightClick = (e: React.MouseEvent) => {
@@ -116,11 +121,39 @@ function MediaCardBase({
     }
   };
 
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearLongPress = () => {
+    if (longPressTimer.current) {
+      clearTimeout(longPressTimer.current);
+      longPressTimer.current = null;
+    }
+  };
+
+  const handleTouchStart = (e: React.TouchEvent) => {
+    if (!onContextMenu) return;
+    const touch = e.touches[0];
+    longPressTimer.current = setTimeout(() => {
+      onContextMenu(
+        {
+          preventDefault() {},
+          stopPropagation() {},
+          clientX: touch.clientX,
+          clientY: touch.clientY,
+        } as React.MouseEvent,
+        item
+      );
+    }, 420);
+  };
+
   return (
     <motion.div
       className="media-card"
       onClick={() => onSelect(item)}
       onContextMenu={handleRightClick}
+      onTouchStart={handleTouchStart}
+      onTouchEnd={clearLongPress}
+      onTouchMove={clearLongPress}
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
       initial={animated ? { opacity: 0, y: 8 } : false}

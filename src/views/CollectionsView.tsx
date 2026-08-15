@@ -16,6 +16,7 @@ interface CollectionsViewProps {
   favorites: string[];
   onToggleFavorite: (id: string) => void;
   onToggleWatchlist?: (id: string) => void;
+  onMarkWatched?: (item: MediaItem, watched: boolean) => void;
   onContextMenu?: (e: React.MouseEvent, media: MediaItem) => void;
   onAddNewCollection: (name: string, description: string) => void;
   onDeleteCollection?: (id: string) => void;
@@ -34,6 +35,7 @@ export function CollectionsView({
   favorites,
   onToggleFavorite,
   onToggleWatchlist,
+  onMarkWatched,
   onContextMenu,
   onAddNewCollection,
   onDeleteCollection,
@@ -69,6 +71,7 @@ export function CollectionsView({
           isFavorite={favorites.includes(item.id)}
           onToggleFavorite={onToggleFavorite}
           onToggleWatchlist={onToggleWatchlist}
+          onMarkWatched={onMarkWatched}
           onContextMenu={onContextMenu}
         />
       ))}
@@ -176,6 +179,7 @@ export function CollectionsView({
                     isFavorite={favorites.includes(item.id)}
                     onToggleFavorite={onToggleFavorite}
                     onToggleWatchlist={onToggleWatchlist}
+                    onMarkWatched={onMarkWatched}
                     onContextMenu={onContextMenu}
                   />
                   {onRemoveFromCollection && (

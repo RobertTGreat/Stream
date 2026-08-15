@@ -35,8 +35,10 @@ pub async fn resolve_imdb_id(
     client: &Client,
     title: &str,
     is_movie: bool,
+    tmdb_id: Option<u64>,
+    year: Option<u32>,
 ) -> Option<String> {
-    if let Some(id) = fetch_imdb_id_from_tmdb(client, title, is_movie).await {
+    if let Some(id) = fetch_imdb_id_from_tmdb(client, title, is_movie, tmdb_id, year).await {
         return Some(id);
     }
     let kinds = if is_movie {
@@ -73,33 +75,52 @@ pub async fn resolve_imdb_id(
     None
 }
 
-async fn fetch_imdb_id_from_tmdb(client: &Client, title: &str, is_movie: bool) -> Option<String> {
-    let auth_token = "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIxYjcwZWNhYjczY2U1Y2JkMGJhYWY0ODBhZDQ2MzVkZCIsIm5iZiI6MTc1ODE0NzExMC4yODMsInN1YiI6IjY4Y2IzMjI2ZDMyZjM1NGFhOGUzNjUwMSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.ZI_hoiq5k1Uofi_YTRDrmUYMc9ZgwrHe_gZWTqR5HQ4";
+fn tmdb_auth_token() -> &'static str {
+    "eyJhbGciOiJIUzI1NiJ9.eyJhdWQiOiIxYjcwZWNhYjczY2U1Y2JkMGJhYWY0ODBhZDQ2MzVkZCIsIm5iZiI6MTc1ODE0NzExMC4yODMsInN1YiI6IjY4Y2IzMjI2ZDMyZjM1NGFhOGUzNjUwMSIsInNjb3BlcyI6WyJhcGlfcmVhZCJdLCJ2ZXJzaW9uIjoxfQ.ZI_hoiq5k1Uofi_YTRDrmUYMc9ZgwrHe_gZWTqR5HQ4"
+}
+
+async fn fetch_imdb_id_from_tmdb(
+    client: &Client,
+    title: &str,
+    is_movie: bool,
+    known_tmdb_id: Option<u64>,
+    year: Option<u32>,
+) -> Option<String> {
     let search_type = if is_movie { "movie" } else { "tv" };
-    let search_url = format!(
-        "https://api.themoviedb.org/3/search/{}?query={}",
-        search_type,
-        urlencoding::encode(title)
-    );
+    let tmdb_id = if let Some(id) = known_tmdb_id {
+        id
+    } else {
+        let mut search_url = format!(
+            "https://api.themoviedb.org/3/search/{}?query={}",
+            search_type,
+            urlencoding::encode(title)
+        );
+        if let Some(year) = year {
+            if is_movie {
+                search_url.push_str(&format!("&year={year}"));
+            } else {
+                search_url.push_str(&format!("&first_air_date_year={year}"));
+            }
+        }
 
-    let res = client
-        .get(&search_url)
-        .header("accept", "application/json")
-        .header("Authorization", format!("Bearer {auth_token}"))
-        .send()
-        .await
-        .ok()?;
-    if !res.status().is_success() {
-        return None;
-    }
-
-    let json: serde_json::Value = res.json().await.ok()?;
-    let tmdb_id = json.get("results")?.as_array()?.first()?.get("id")?.as_u64()?;
+        let res = client
+            .get(&search_url)
+            .header("accept", "application/json")
+            .header("Authorization", format!("Bearer {}", tmdb_auth_token()))
+            .send()
+            .await
+            .ok()?;
+        if !res.status().is_success() {
+            return None;
+        }
+        let json: serde_json::Value = res.json().await.ok()?;
+        json.get("results")?.as_array()?.first()?.get("id")?.as_u64()?
+    };
     let ext_url = format!("https://api.themoviedb.org/3/{search_type}/{tmdb_id}/external_ids");
     let ext_res = client
         .get(&ext_url)
         .header("accept", "application/json")
-        .header("Authorization", format!("Bearer {auth_token}"))
+        .header("Authorization", format!("Bearer {}", tmdb_auth_token()))
         .send()
         .await
         .ok()?;
@@ -126,7 +147,7 @@ pub async fn fetch(
     let is_movie = media_type == "movie";
     let imdb = match imdb_id.filter(|id| id.starts_with("tt")) {
         Some(id) => id.to_string(),
-        None => match resolve_imdb_id(client, title, is_movie).await {
+        None => match resolve_imdb_id(client, title, is_movie, None, None).await {
             Some(id) => id,
             None => return Ok(Vec::new()),
         },

@@ -13,7 +13,8 @@ use mpv::{
 };
 use std::sync::Arc;
 use tauri::{Manager, State, Window};
-use torrent::{DownloadTask, StreamEngine, StreamInfo, TorrentAddResult, TorrentFileItem};
+use tauri_plugin_android_player::{AndroidPlayerExt, PlayerState};
+use torrent::{DownloadStatus, DownloadTask, StreamEngine, StreamInfo, TorrentAddResult, TorrentFileItem};
 
 pub struct AppState {
     pub engine: Arc<StreamEngine>,
@@ -21,17 +22,31 @@ pub struct AppState {
 
 #[tauri::command]
 fn app_minimize_cmd(window: Window) {
-    let _ = window.minimize();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        let _ = window.minimize();
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = window;
+    }
 }
 
 #[tauri::command]
 fn app_toggle_maximize_cmd(window: Window) {
-    if let Ok(is_max) = window.is_maximized() {
-        if is_max {
-            let _ = window.unmaximize();
-        } else {
-            let _ = window.maximize();
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        if let Ok(is_max) = window.is_maximized() {
+            if is_max {
+                let _ = window.unmaximize();
+            } else {
+                let _ = window.maximize();
+            }
         }
+    }
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = window;
     }
 }
 
@@ -53,8 +68,12 @@ fn scan_library(path: String, media_type: String) -> ScanLibraryResult {
 #[tauri::command(rename_all = "snake_case")]
 async fn search_torrents_cmd(
     query: String,
+    title: Option<String>,
     media_type: String,
     anilist_id: Option<u64>,
+    tmdb_id: Option<u64>,
+    imdb_id: Option<String>,
+    year: Option<u32>,
     season: Option<u32>,
     episode: Option<u32>,
     enable_nyaa: Option<bool>,
@@ -80,6 +99,10 @@ async fn search_torrents_cmd(
         &media_type,
         anilist_id,
         SearchOptions {
+            title,
+            tmdb_id,
+            imdb_id,
+            year,
             season,
             episode,
             enable_nyaa: enable_nyaa.unwrap_or(defaults.enable_nyaa),
@@ -207,20 +230,69 @@ pub struct HealthCheckResult {
 }
 
 #[tauri::command(rename_all = "snake_case")]
+fn android_player_play_cmd(app: tauri::AppHandle, url: String, start_at: Option<f64>) -> Result<(), String> {
+    app.android_player().play(url, start_at)
+}
+
+#[tauri::command]
+fn android_player_pause_cmd(app: tauri::AppHandle) -> Result<(), String> {
+    app.android_player().pause()
+}
+
+#[tauri::command]
+fn android_player_resume_cmd(app: tauri::AppHandle) -> Result<(), String> {
+    app.android_player().resume()
+}
+
+#[tauri::command]
+fn android_player_toggle_cmd(app: tauri::AppHandle) -> Result<(), String> {
+    app.android_player().toggle_pause()
+}
+
+#[tauri::command]
+fn android_player_stop_cmd(app: tauri::AppHandle) -> Result<(), String> {
+    app.android_player().stop()
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn android_player_seek_cmd(app: tauri::AppHandle, position: f64) -> Result<(), String> {
+    app.android_player().seek(position)
+}
+
+#[tauri::command(rename_all = "snake_case")]
+fn android_player_set_speed_cmd(app: tauri::AppHandle, speed: f64) -> Result<(), String> {
+    app.android_player().set_speed(speed)
+}
+
+#[tauri::command]
+fn android_player_get_state_cmd(app: tauri::AppHandle) -> Result<PlayerState, String> {
+    app.android_player().get_state()
+}
+
+#[tauri::command(rename_all = "snake_case")]
 async fn select_directory_cmd(title: Option<String>, default_path: Option<String>) -> Option<String> {
-    tokio::task::spawn_blocking(move || {
-        let mut dialog = rfd::FileDialog::new();
-        if let Some(t) = title {
-            dialog = dialog.set_title(&t);
-        }
-        if let Some(p) = default_path {
-            dialog = dialog.set_directory(&p);
-        }
-        dialog.pick_folder().map(|p| p.to_string_lossy().to_string())
-    })
-    .await
-    .ok()
-    .flatten()
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        let _ = (title, default_path);
+        None
+    }
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        tokio::task::spawn_blocking(move || {
+            let mut dialog = rfd::FileDialog::new();
+            if let Some(t) = title {
+                dialog = dialog.set_title(&t);
+            }
+            if let Some(p) = default_path {
+                dialog = dialog.set_directory(&p);
+            }
+            dialog.pick_folder().map(|p| p.to_string_lossy().to_string())
+        })
+        .await
+        .ok()
+        .flatten()
+    }
 }
 
 #[tauri::command(rename_all = "snake_case")]
@@ -287,10 +359,17 @@ async fn check_indexer_health_cmd(
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut builder = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_deep_link::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_android_player::init());
+
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    {
+        builder = builder.plugin(tauri_plugin_window_state::Builder::default().build());
+    }
+
+    builder
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::CloseRequested { .. } | tauri::WindowEvent::Destroyed = event {
                 if let Some(mpv_state) = window.try_state::<MpvState>() {
@@ -303,16 +382,30 @@ pub fn run() {
             }
         })
         .setup(|app| {
-            let download_dir = app
-                .path()
-                .download_dir()
-                .unwrap_or_else(|_| std::env::temp_dir());
-            let engine = tauri::async_runtime::block_on(StreamEngine::new(download_dir))?;
+            let download_dir = {
+                #[cfg(target_os = "android")]
+                {
+                    app.path()
+                        .app_data_dir()
+                        .or_else(|_| app.path().app_cache_dir())
+                        .unwrap_or_else(|_| std::env::temp_dir())
+                        .join("downloads")
+                }
+                #[cfg(not(target_os = "android"))]
+                {
+                    app.path()
+                        .download_dir()
+                        .unwrap_or_else(|_| std::env::temp_dir())
+                }
+            };
+            let engine = Arc::new(tauri::async_runtime::block_on(StreamEngine::new(download_dir))?);
             app.manage(AppState {
-                engine: Arc::new(engine),
+                engine: engine.clone(),
             });
             app.manage(MpvState(std::sync::Mutex::new(None)));
             app.manage(DiscordState(std::sync::Mutex::new(None)));
+            #[cfg(target_os = "android")]
+            start_android_download_notifier(app.handle().clone(), engine);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -331,6 +424,14 @@ pub fn run() {
             start_torrent_stream_cmd,
             configure_engine_cmd,
             select_directory_cmd,
+            android_player_play_cmd,
+            android_player_pause_cmd,
+            android_player_resume_cmd,
+            android_player_toggle_cmd,
+            android_player_stop_cmd,
+            android_player_seek_cmd,
+            android_player_set_speed_cmd,
+            android_player_get_state_cmd,
             check_indexer_health_cmd,
             mpv_play_cmd,
             mpv_command_cmd,
@@ -345,4 +446,195 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running stream application");
+}
+
+fn format_bytes_short(bytes: u64) -> String {
+    if bytes >= 1_073_741_824 {
+        format!("{:.1} GB", bytes as f64 / 1_073_741_824.0)
+    } else if bytes >= 1_048_576 {
+        format!("{:.0} MB", bytes as f64 / 1_048_576.0)
+    } else if bytes >= 1024 {
+        format!("{:.0} KB", bytes as f64 / 1024.0)
+    } else {
+        format!("{bytes} B")
+    }
+}
+
+fn format_speed(bps: u64) -> String {
+    if bps >= 1_000_000 {
+        format!("{:.1} MB/s", bps as f64 / 1_000_000.0)
+    } else if bps >= 1000 {
+        format!("{:.0} KB/s", bps as f64 / 1000.0)
+    } else {
+        format!("{bps} B/s")
+    }
+}
+
+fn format_eta(seconds: u64) -> String {
+    if seconds == 0 {
+        return "…".to_string();
+    }
+    if seconds >= 3600 {
+        format!("{}h {:02}m", seconds / 3600, (seconds % 3600) / 60)
+    } else if seconds >= 60 {
+        format!("{}m", seconds / 60)
+    } else {
+        format!("{seconds}s")
+    }
+}
+
+fn clean_notification_title(raw: &str) -> String {
+    let mut title = raw.trim().to_string();
+    if title.starts_with('[') {
+        if let Some(end) = title.find(']') {
+            title = title[end + 1..].trim().to_string();
+        }
+    }
+    title = title.replace('.', " ");
+    for token in [
+        "1080p", "720p", "2160p", "480p", "4k", "uhd", "webrip", "web-dl", "bluray",
+        "blu-ray", "x264", "x265", "h264", "h265", "hevc", "av1", "aac", "dts",
+        "hdr", "hdr10", "dv", "remux", "proper", "repack",
+    ] {
+        let re = regex::Regex::new(&format!(r"(?i)\b{}\b", regex::escape(token))).ok();
+        if let Some(re) = re {
+            title = re.replace_all(&title, " ").into_owned();
+        }
+    }
+    title = regex::Regex::new(r"(?i)\bS\d{1,2}E\d{1,2}\b")
+        .ok()
+        .map(|re| re.replace_all(&title, " ").into_owned())
+        .unwrap_or(title);
+    title = regex::Regex::new(r"\s+")
+        .ok()
+        .map(|re| re.replace_all(&title, " ").into_owned())
+        .unwrap_or(title);
+    let cleaned = title.trim().trim_matches('-').trim().to_string();
+    if cleaned.is_empty() {
+        raw.trim().to_string()
+    } else {
+        cleaned
+    }
+}
+
+fn summarize_download_notification(tasks: &[DownloadTask]) -> Option<(String, String, i32, bool, bool)> {
+    let active: Vec<&DownloadTask> = tasks
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.status,
+                DownloadStatus::Downloading | DownloadStatus::Streaming | DownloadStatus::Queued
+            )
+        })
+        .collect();
+    if active.is_empty() {
+        return None;
+    }
+
+    let count = active.len();
+    let primary = active
+        .iter()
+        .max_by(|a, b| {
+            a.download_speed_bps
+                .cmp(&b.download_speed_bps)
+                .then_with(|| {
+                    (a.progress as i32).cmp(&(b.progress as i32))
+                })
+        })
+        .copied()
+        .unwrap_or(active[0]);
+    let progress = if count == 1 {
+        primary.progress.round() as i32
+    } else {
+        (active.iter().map(|t| t.progress as f64).sum::<f64>() / count as f64).round() as i32
+    };
+    let pretty = clean_notification_title(&primary.title);
+    let title = if count == 1 {
+        pretty.clone()
+    } else {
+        format!("{} downloads", count)
+    };
+    let size = if primary.total_bytes > 0 {
+        format!(
+            "{} / {}",
+            format_bytes_short(primary.downloaded_bytes),
+            format_bytes_short(primary.total_bytes)
+        )
+    } else {
+        format_bytes_short(primary.downloaded_bytes)
+    };
+    let text = if matches!(primary.status, DownloadStatus::Queued) {
+        if count == 1 {
+            "Waiting for peers…".to_string()
+        } else {
+            format!("{} queued · {}", count, pretty)
+        }
+    } else if count == 1 {
+        format!(
+            "{}% · {} · {} · ETA {}",
+            progress.max(0),
+            size,
+            format_speed(primary.download_speed_bps),
+            format_eta(primary.eta_seconds)
+        )
+    } else {
+        format!(
+            "{}% · {} · {}",
+            progress.max(0),
+            format_speed(primary.download_speed_bps),
+            pretty
+        )
+    };
+    let indeterminate = matches!(primary.status, DownloadStatus::Queued) || primary.total_bytes == 0;
+    Some((title, text, progress.clamp(0, 100), indeterminate, true))
+}
+
+#[cfg(target_os = "android")]
+fn start_android_download_notifier<R: tauri::Runtime>(app: tauri::AppHandle<R>, engine: Arc<StreamEngine>) {
+    tauri::async_runtime::spawn(async move {
+        let mut last_signature = String::new();
+        let mut showing = false;
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+            let tasks = engine.list_tasks();
+            let summary = summarize_download_notification(&tasks);
+            let signature = match &summary {
+                Some((title, text, progress, indeterminate, _)) => {
+                    format!("{title}|{text}|{progress}|{indeterminate}")
+                }
+                None => String::new(),
+            };
+            if signature == last_signature {
+                continue;
+            }
+            last_signature = signature;
+            let player = app.android_player();
+            let result = if let Some((title, text, progress, indeterminate, ongoing)) = summary {
+                showing = true;
+                player.update_download_notification(
+                    title,
+                    text,
+                    progress,
+                    indeterminate,
+                    ongoing,
+                    false,
+                )
+            } else if showing {
+                showing = false;
+                player.update_download_notification(
+                    String::new(),
+                    String::new(),
+                    0,
+                    false,
+                    false,
+                    true,
+                )
+            } else {
+                Ok(())
+            };
+            if let Err(err) = result {
+                eprintln!("download notification update failed: {err}");
+            }
+        }
+    });
 }

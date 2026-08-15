@@ -13,7 +13,10 @@ import {
   ChevronLeft,
   ChevronRight,
   Sparkles,
+  Info,
+  X,
 } from "lucide-react";
+import { isMobileUi } from "../utils/platform";
 import { Episode, MediaItem } from "../types";
 import { EpisodeSelector } from "../components/EpisodeSelector";
 import { getHeroImageUrl, upgradeImageUrl } from "../utils/mediaImages";
@@ -154,6 +157,7 @@ interface MediaDetailViewProps {
   onToggleFavorite: (id: string) => void;
   isInWatchlist: boolean;
   onToggleWatchlist: (id: string) => void;
+  onMarkWatched?: (item: MediaItem, watched: boolean) => void;
   watchedEpisodes?: Record<number, number>;
   onContextMenu?: (e: React.MouseEvent, media: MediaItem, ep?: Episode) => void;
   onSelectMedia?: (media: MediaItem) => void;
@@ -168,13 +172,37 @@ export function MediaDetailView({
   isFavorite,
   onToggleFavorite,
   onToggleWatchlist,
+  onMarkWatched,
   watchedEpisodes = {},
   onContextMenu,
   onSelectMedia,
 }: MediaDetailViewProps) {
   const [isDescriptionExpanded, setIsDescriptionExpanded] = useState(false);
   const [recommendations, setRecommendations] = useState<MediaItem[]>([]);
-  const isSingleEpisode = episodes.length <= 1 || media.mediaType === "movie";
+  const [infoOpen, setInfoOpen] = useState(false);
+  const [activeSeason, setActiveSeason] = useState<number | null>(null);
+  const [isMobile, setIsMobile] = useState(() => isMobileUi());
+
+  useEffect(() => {
+    const sync = () => setIsMobile(isMobileUi());
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, []);
+
+  useEffect(() => {
+    setActiveSeason(null);
+  }, [media.id]);
+
+  const seasonNumbers = Array.from(
+    new Set(episodes.map((ep) => ep.seasonNumber || 1).filter((n) => n > 0))
+  ).sort((a, b) => a - b);
+
+  const visibleEpisodes =
+    activeSeason == null
+      ? episodes
+      : episodes.filter((ep) => (ep.seasonNumber || 1) === activeSeason);
+
+  const isSingleEpisode = visibleEpisodes.length <= 1 || media.mediaType === "movie";
   const watchedCount = Object.values(watchedEpisodes).filter((p) => p >= 90).length;
   const externalUrls = getExternalUrls(media);
 
@@ -251,9 +279,9 @@ export function MediaDetailView({
       </header>
 
       {/* Main Grid Layout: Floating Left Sidebar + Main Content Right */}
-      <div className="detail-layout-container">
+      <div className={`detail-layout-container ${isMobile ? "is-mobile-detail" : ""}`}>
         {/* Floating Left Sidebar Section */}
-        <aside className="detail-floating-left">
+        <aside className={`detail-floating-left ${isMobile ? "is-hidden-on-mobile" : ""}`}>
           {/* Poster Artwork */}
           <div className="detail-poster">
             <MediaImage
@@ -473,6 +501,18 @@ export function MediaDetailView({
                 <Download size={16} />
               </button>
 
+              {isMobile && (
+                <button
+                  type="button"
+                  className="detail-btn-icon detail-btn-info"
+                  onClick={() => setInfoOpen(true)}
+                  title="Details"
+                  aria-label="Details"
+                >
+                  <Info size={16} />
+                </button>
+              )}
+
               <QuickActionPlusMenu
                 mediaId={media.id}
                 mediaTitle={media.title}
@@ -481,6 +521,7 @@ export function MediaDetailView({
                 isFavorite={isFavorite}
                 onToggleFavorite={onToggleFavorite}
                 onToggleWatchlist={onToggleWatchlist}
+                onMarkWatched={onMarkWatched}
                 buttonClassName="detail-btn-icon"
               />
 
@@ -558,63 +599,74 @@ export function MediaDetailView({
 
           <div className="detail-main-body">
             {/* Multi-Season / Franchise Quick Switcher (e.g. S1, S2, S3 for Grand Blue, Attack on Titan, etc.) */}
-            {media.relatedSeasons && media.relatedSeasons.length > 1 && (
+            {(seasonNumbers.length > 1 || (media.relatedSeasons && media.relatedSeasons.length > 1)) && (
               <section className="detail-block detail-seasons-block">
                 <div className="detail-block-head">
                   <Sparkles size={15} className="text-purple-400" />
-                  <h2>Franchise & Seasons</h2>
-                  <span className="detail-block-meta">{media.relatedSeasons.length} seasons / parts</span>
+                  <h2>Seasons</h2>
+                  <span className="detail-block-meta">
+                    {seasonNumbers.length > 1 ? `${seasonNumbers.length} seasons` : `${media.relatedSeasons?.length || 0} parts`}
+                  </span>
                 </div>
                 <div className="detail-seasons-bar">
-                  {media.relatedSeasons.map((season) => {
+                  {seasonNumbers.length > 1 && (
+                    <>
+                      <button
+                        type="button"
+                        className={`season-chip-btn ${activeSeason == null ? "active" : ""}`}
+                        onClick={() => setActiveSeason(null)}
+                      >
+                        <span className="season-badge-tag">All</span>
+                      </button>
+                      {seasonNumbers.map((seasonNum) => {
+                        const meta = media.relatedSeasons?.find((s) => s.seasonNumber === seasonNum);
+                        return (
+                          <button
+                            key={`season_filter_${seasonNum}`}
+                            type="button"
+                            className={`season-chip-btn ${activeSeason === seasonNum ? "active" : ""}`}
+                            onClick={() => setActiveSeason(seasonNum)}
+                          >
+                            <span className="season-badge-tag">{meta?.seasonLabel || `S${seasonNum}`}</span>
+                            {meta?.year && <span className="season-year-tag">{meta.year}</span>}
+                          </button>
+                        );
+                      })}
+                    </>
+                  )}
+                  {seasonNumbers.length <= 1 && media.relatedSeasons?.map((season) => {
                     const isActive =
                       season.id === media.id ||
-                      (season.anilistId && season.anilistId === media.anilistId) ||
-                      (season.tmdbId && season.tmdbId === media.tmdbId && (media.seasonsCount ? season.seasonNumber === (media.episodesCount ? 1 : 1) : true));
-                    const tipHint = [
-                      season.year,
-                      season.episodesCount ? `${season.episodesCount} eps` : null,
-                      season.format || "TV",
-                    ]
-                      .filter(Boolean)
-                      .join(" · ");
+                      (season.anilistId != null && season.anilistId === media.anilistId);
                     return (
-                      <Tooltip
+                      <button
                         key={`season_${season.id}_${season.seasonNumber}`}
-                        label={season.title}
-                        hint={tipHint}
-                        side="bottom"
+                        type="button"
+                        className={`season-chip-btn ${isActive ? "active" : ""}`}
+                        onClick={() => {
+                          if (isActive || !onSelectMedia) return;
+                          onSelectMedia({
+                            id: season.id,
+                            anilistId: season.anilistId,
+                            tmdbId: season.tmdbId,
+                            title: season.title,
+                            mediaType: season.mediaType || media.mediaType,
+                            format: (season.format as any) || media.format,
+                            status: (season.status as any) || media.status,
+                            coverImage: season.coverImage || media.coverImage,
+                            bannerImage: season.bannerImage || media.bannerImage,
+                            synopsis: media.synopsis,
+                            genres: media.genres || [],
+                            year: season.year || media.year,
+                            score: season.score || media.score,
+                            episodesCount: season.episodesCount,
+                            relatedSeasons: media.relatedSeasons,
+                          });
+                        }}
                       >
-                        <button
-                          type="button"
-                          className={`season-chip-btn ${isActive ? "active" : ""}`}
-                          onClick={() => {
-                            if (isActive) return;
-                            const targetMedia: MediaItem = {
-                              id: season.id,
-                              anilistId: season.anilistId,
-                              tmdbId: season.tmdbId,
-                              title: season.title,
-                              mediaType: season.mediaType || media.mediaType,
-                              format: (season.format as any) || media.format,
-                              status: (season.status as any) || media.status,
-                              coverImage: season.coverImage || media.coverImage,
-                              bannerImage: season.bannerImage || media.bannerImage,
-                              synopsis: "",
-                              genres: media.genres || [],
-                              year: season.year || media.year,
-                              score: season.score || media.score,
-                              episodesCount: season.episodesCount,
-                              relatedSeasons: media.relatedSeasons,
-                            };
-                            onSelectMedia?.(targetMedia);
-                          }}
-                          aria-label={season.title}
-                        >
-                          <span className="season-badge-tag">{season.seasonLabel}</span>
-                          {season.year && <span className="season-year-tag">{season.year}</span>}
-                        </button>
-                      </Tooltip>
+                        <span className="season-badge-tag">{season.seasonLabel}</span>
+                        {season.year && <span className="season-year-tag">{season.year}</span>}
+                      </button>
                     );
                   })}
                 </div>
@@ -628,14 +680,14 @@ export function MediaDetailView({
                   <h2>Episodes</h2>
                   <span className="detail-block-meta">
                     {watchedCount > 0
-                      ? `${watchedCount} / ${episodes.length} watched`
-                      : `${episodes.length} episodes`}
+                      ? `${watchedCount} / ${visibleEpisodes.length} watched`
+                      : `${visibleEpisodes.length} episodes`}
                   </span>
                 </div>
 
                 <EpisodeSelector
-                  episodes={episodes}
-                  seasonsCount={media.seasonsCount || 1}
+                  episodes={visibleEpisodes}
+                  seasonsCount={seasonNumbers.length || media.seasonsCount || 1}
                   onPlayEpisode={onPlayEpisode}
                   onDownloadEpisode={(ep) => onOpenTorrentModal("download", ep)}
                   watchedEpisodes={watchedEpisodes}
@@ -723,6 +775,7 @@ export function MediaDetailView({
                           onSelect={onSelectMedia || (() => {})}
                           onToggleFavorite={onToggleFavorite}
                           onToggleWatchlist={onToggleWatchlist}
+                          onMarkWatched={onMarkWatched}
                           onContextMenu={onContextMenu ? (e, m) => onContextMenu(e, m) : undefined}
                         />
                       </div>
@@ -734,6 +787,134 @@ export function MediaDetailView({
           </div>
         </main>
       </div>
+
+      {isMobile && infoOpen && (
+        <div className="detail-info-sheet-backdrop" onClick={() => setInfoOpen(false)}>
+          <div className="detail-info-sheet" onClick={(e) => e.stopPropagation()}>
+            <div className="mobile-sheet-handle" />
+            <div className="detail-info-sheet-header">
+              <h2>Details</h2>
+              <button type="button" className="mobile-icon-btn" onClick={() => setInfoOpen(false)} aria-label="Close details">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="detail-info-sheet-body">
+              <div className="detail-info-sheet-poster">
+                <MediaImage
+                  src={upgradeImageUrl(media.coverImage) || media.coverImage}
+                  alt={media.title}
+                  emptyLabel="No cover"
+                />
+              </div>
+              <div className="detail-floating-card">
+                {media.score != null && (
+                  <div className="detail-info-group">
+                    <span className="detail-info-label">Rating</span>
+                    <div className="detail-rating-box">
+                      <Star size={16} className="fill-current text-amber-400" />
+                      <span className="detail-rating-score">{media.score}</span>
+                      <span className="detail-rating-max">/ 10</span>
+                    </div>
+                  </div>
+                )}
+                {(media.year || media.status || media.format || media.studio) && (
+                  <div className="detail-info-group">
+                    <span className="detail-info-label">Release & Details</span>
+                    <div className="detail-meta-stack">
+                      {media.year && (
+                        <div className="detail-meta-row">
+                          <Calendar size={13} className="text-zinc-400" />
+                          <span>{media.year}</span>
+                        </div>
+                      )}
+                      {media.status && (
+                        <div className="detail-meta-row">
+                          <span className="detail-status-dot" />
+                          <span className="capitalize">{media.status.replace(/_/g, " ").toLowerCase()}</span>
+                        </div>
+                      )}
+                      {media.format && (
+                        <div className="detail-meta-row">
+                          <span className="detail-format-badge">{media.format}</span>
+                        </div>
+                      )}
+                      {media.studio && (
+                        <div className="detail-meta-row">
+                          <Clapperboard size={13} className="text-zinc-400" />
+                          <span className="text-zinc-300">{media.studio}</span>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+                {media.genres.length > 0 && (
+                  <div className="detail-info-group">
+                    <span className="detail-info-label">Genres</span>
+                    <div className="detail-genre-tags">
+                      {media.genres.map((g) => (
+                        <span key={g} className="detail-genre-tag">{g}</span>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                <div className="detail-info-group">
+                  <span className="detail-info-label">External Pages</span>
+                  <div className="detail-ext-links">
+                    {externalUrls.anilistUrl && (
+                      <button type="button" className="detail-ext-btn hover-anilist" aria-label="AniList" onClick={() => handleOpenExternal(externalUrls.anilistUrl)}>
+                        <AniListLogo size={15} />
+                      </button>
+                    )}
+                    {externalUrls.malUrl && (
+                      <button type="button" className="detail-ext-btn hover-mal" aria-label="MyAnimeList" onClick={() => handleOpenExternal(externalUrls.malUrl)}>
+                        <MalLogo size={15} />
+                      </button>
+                    )}
+                    {externalUrls.imdbUrl && (
+                      <button type="button" className="detail-ext-btn hover-imdb" aria-label="IMDb" onClick={() => handleOpenExternal(externalUrls.imdbUrl)}>
+                        <ImdbLogo size={16} />
+                      </button>
+                    )}
+                    {externalUrls.tmdbUrl && (
+                      <button type="button" className="detail-ext-btn hover-tmdb" aria-label="TMDB" onClick={() => handleOpenExternal(externalUrls.tmdbUrl)}>
+                        <TmdbLogo size={15} />
+                      </button>
+                    )}
+                    {externalUrls.traktUrl && (
+                      <button type="button" className="detail-ext-btn hover-trakt" aria-label="Trakt" onClick={() => handleOpenExternal(externalUrls.traktUrl)}>
+                        <TraktLogo size={15} />
+                      </button>
+                    )}
+                  </div>
+                </div>
+                {media.cast && media.cast.length > 0 && (
+                  <div className="detail-info-group">
+                    <div className="detail-info-label-row">
+                      <Users size={13} />
+                      <span className="detail-info-label">Cast & Characters</span>
+                    </div>
+                    <div className="detail-sidebar-cast is-sheet">
+                      {media.cast.map((member) => (
+                        <div key={member.name} className="detail-cast-mini-item">
+                          {member.avatar ? (
+                            <img src={member.avatar} alt="" className="detail-cast-mini-avatar" />
+                          ) : (
+                            <div className="detail-cast-mini-fallback">{member.name.charAt(0)}</div>
+                          )}
+                          <div className="detail-cast-mini-info">
+                            <span className="detail-cast-mini-name">{member.name}</span>
+                            <span className="detail-cast-mini-role">{member.role}</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -17,6 +17,7 @@ interface SearchViewProps {
   favorites: string[];
   onToggleFavorite: (id: string) => void;
   onToggleWatchlist?: (id: string) => void;
+  onMarkWatched?: (item: MediaItem, watched: boolean) => void;
   onContextMenu?: (e: React.MouseEvent, media: MediaItem) => void;
 }
 
@@ -33,6 +34,7 @@ export function SearchView({
   favorites,
   onToggleFavorite,
   onToggleWatchlist,
+  onMarkWatched,
   onContextMenu,
 }: SearchViewProps) {
   const [query, setQuery] = useState("");
@@ -229,6 +231,7 @@ export function SearchView({
                   isFavorite={favorites.includes(item.id)}
                   onToggleFavorite={onToggleFavorite}
                   onToggleWatchlist={onToggleWatchlist}
+                  onMarkWatched={onMarkWatched}
                   onContextMenu={onContextMenu}
                 />
               ))}

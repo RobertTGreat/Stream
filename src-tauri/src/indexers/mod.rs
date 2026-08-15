@@ -29,6 +29,12 @@ pub async fn search_all_providers(
     let is_anime = media_type == "anime";
     let is_movie = media_type == "movie";
     let is_tv = media_type == "tv";
+    let lookup_title = options
+        .title
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(q_clean);
 
     let seadex_fut = async {
         if options.enable_seadex && is_anime {
@@ -41,7 +47,7 @@ pub async fn search_all_providers(
         Vec::new()
     };
     let tosho_fut = async {
-        if options.enable_animetosho && (is_anime || is_tv) {
+        if options.enable_animetosho && is_anime {
             return tosho::fetch(&client, q_clean, media_type)
                 .await
                 .unwrap_or_default();
@@ -49,7 +55,7 @@ pub async fn search_all_providers(
         Vec::new()
     };
     let nyaa_fut = async {
-        if options.enable_nyaa {
+        if options.enable_nyaa && is_anime {
             return nyaa::fetch(&client, q_clean, &options.nyaa_url, media_type)
                 .await
                 .unwrap_or_default();
@@ -58,10 +64,22 @@ pub async fn search_all_providers(
     };
     let torrentio_task = async {
         if options.enable_torrentio {
-            let imdb_id = torrentio::resolve_imdb_id(&client, q_clean, is_movie).await;
+            let imdb_id = match options.imdb_id.as_deref().filter(|id| id.starts_with("tt")) {
+                Some(id) => Some(id.to_string()),
+                None => {
+                    torrentio::resolve_imdb_id(
+                        &client,
+                        lookup_title,
+                        is_movie,
+                        options.tmdb_id,
+                        options.year,
+                    )
+                    .await
+                }
+            };
             return torrentio::fetch(
                 &client,
-                q_clean,
+                lookup_title,
                 media_type,
                 imdb_id.as_deref(),
                 options.season,
@@ -74,13 +92,27 @@ pub async fn search_all_providers(
     };
     let yts_fut = async {
         if options.enable_yts && is_movie {
-            return yts::fetch(&client, q_clean).await.unwrap_or_default();
+            return yts::fetch(&client, q_clean, options.imdb_id.as_deref(), options.year)
+                .await
+                .unwrap_or_default();
         }
         Vec::new()
     };
     let eztv_task = async {
         if options.enable_eztv && (is_tv || is_anime) {
-            let imdb_id = torrentio::resolve_imdb_id(&client, q_clean, is_movie).await;
+            let imdb_id = match options.imdb_id.as_deref().filter(|id| id.starts_with("tt")) {
+                Some(id) => Some(id.to_string()),
+                None => {
+                    torrentio::resolve_imdb_id(
+                        &client,
+                        lookup_title,
+                        is_movie,
+                        options.tmdb_id,
+                        options.year,
+                    )
+                    .await
+                }
+            };
             return eztv::fetch(&client, imdb_id.as_deref(), options.season, options.episode)
                 .await
                 .unwrap_or_default();

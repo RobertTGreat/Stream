@@ -14,6 +14,7 @@ import {
   ExternalLink,
 } from "lucide-react";
 import { MediaItem, Episode, StreamProgress } from "../types";
+import { isMobileUi } from "../utils/platform";
 
 export interface ContextMenuState {
   isOpen: boolean;
@@ -57,7 +58,7 @@ export function ContextMenu({
   const menuRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
+    const handleClickOutside = (e: Event) => {
       if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
         onClose();
       }
@@ -68,10 +69,12 @@ export function ContextMenu({
 
     if (state.isOpen) {
       window.addEventListener("mousedown", handleClickOutside);
+      window.addEventListener("touchstart", handleClickOutside);
       window.addEventListener("keydown", handleKeyDown);
     }
     return () => {
       window.removeEventListener("mousedown", handleClickOutside);
+      window.removeEventListener("touchstart", handleClickOutside);
       window.removeEventListener("keydown", handleKeyDown);
     };
   }, [state.isOpen, onClose]);
@@ -90,14 +93,18 @@ export function ContextMenu({
     onClose();
   };
 
-  return (
+  const mobile = isMobileUi();
+  const iconSize = mobile ? 20 : 14;
+
+  const menu = (
     <div
       ref={menuRef}
-      className="custom-context-menu"
-      style={{ left: `${adjustedX}px`, top: `${adjustedY}px` }}
+      className={`custom-context-menu ${mobile ? "is-mobile-sheet" : ""}`}
+      style={mobile ? undefined : { left: `${adjustedX}px`, top: `${adjustedY}px` }}
       onClick={(e) => e.stopPropagation()}
       onContextMenu={(e) => e.preventDefault()}
     >
+      {mobile && <div className="mobile-sheet-handle" />}
       <div className="ctx-menu-header">
         <span className="ctx-menu-title" title={state.media.title}>
           {state.media.title}
@@ -120,7 +127,7 @@ export function ContextMenu({
           onClose();
         }}
       >
-        <Play size={14} className="text-purple-400 fill-current" />
+        <Play size={iconSize} className="text-purple-400 fill-current" />
         <span>Play</span>
       </button>
 
@@ -133,7 +140,7 @@ export function ContextMenu({
             onClose();
           }}
         >
-          <Info size={14} className="text-zinc-400" />
+          <Info size={iconSize} className="text-zinc-400" />
           <span>Open details</span>
         </button>
       )}
@@ -148,12 +155,12 @@ export function ContextMenu({
       >
         {state.isWatched ? (
           <>
-            <EyeOff size={14} className="text-zinc-400" />
+            <EyeOff size={iconSize} className="text-zinc-400" />
             <span>Mark as unwatched</span>
           </>
         ) : (
           <>
-            <Eye size={14} className="text-emerald-400" />
+            <Eye size={iconSize} className="text-emerald-400" />
             <span>Mark as watched</span>
           </>
         )}
@@ -167,7 +174,7 @@ export function ContextMenu({
           onClose();
         }}
       >
-        <Download size={14} className="text-blue-400" />
+        <Download size={iconSize} className="text-blue-400" />
         <span>Download</span>
       </button>
 
@@ -183,7 +190,7 @@ export function ContextMenu({
           }}
         >
           <Heart
-            size={14}
+            size={iconSize}
             className={state.isFavorite ? "text-rose-500 fill-rose-500" : "text-zinc-400"}
           />
           <span>{state.isFavorite ? "Remove from favorites" : "Add to favorites"}</span>
@@ -201,12 +208,12 @@ export function ContextMenu({
         >
           {state.isInWatchlist ? (
             <>
-              <Check size={14} className="text-emerald-400" />
+              <Check size={iconSize} className="text-emerald-400" />
               <span>Remove from watchlist</span>
             </>
           ) : (
             <>
-              <Plus size={14} className="text-zinc-400" />
+              <Plus size={iconSize} className="text-zinc-400" />
               <span>Add to watchlist</span>
             </>
           )}
@@ -222,13 +229,13 @@ export function ContextMenu({
             onClose();
           }}
         >
-          <Bookmark size={14} className="text-amber-400" />
+          <Bookmark size={iconSize} className="text-amber-400" />
           <span>Add to collection</span>
         </button>
       )}
 
       <button type="button" className="ctx-menu-item" onClick={() => void copyTitle()}>
-        <Copy size={14} className="text-zinc-400" />
+        <Copy size={iconSize} className="text-zinc-400" />
         <span>Copy title</span>
       </button>
 
@@ -241,7 +248,7 @@ export function ContextMenu({
             onClose();
           }}
         >
-          <ExternalLink size={14} className="text-zinc-400" />
+          <ExternalLink size={iconSize} className="text-zinc-400" />
           <span>Open on AniList</span>
         </button>
       )}
@@ -257,11 +264,21 @@ export function ContextMenu({
               onClose();
             }}
           >
-            <Trash2 size={14} />
+            <Trash2 size={iconSize} />
             <span>Remove from Continue</span>
           </button>
         </>
       )}
     </div>
   );
+
+  if (mobile) {
+    return (
+      <div className="ctx-mobile-backdrop" onClick={onClose}>
+        {menu}
+      </div>
+    );
+  }
+
+  return menu;
 }

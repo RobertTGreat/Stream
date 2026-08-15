@@ -10,6 +10,7 @@ import { StorageService } from "../services/storage";
 import { normalizeMediaTitle, getBackdropImageUrl } from "../utils/mediaImages";
 import { getRailScrollState, scrollRailByPage } from "../utils/scrollRail";
 import { MediaImage } from "../components/MediaImage";
+import { isPhoneUi } from "../utils/platform";
 
 type ContinueCard =
   | { kind: "local"; key: string; item: StreamProgress }
@@ -30,6 +31,7 @@ interface HomeViewProps {
   onToggleFavorite: (id: string) => void;
   watchlist: string[];
   onToggleWatchlist: (id: string) => void;
+  onMarkWatched?: (item: MediaItem, watched: boolean) => void;
   onNavigateTab: (tab: "anime" | "movies" | "tv" | "library") => void;
   onContextMenu?: (
     e: React.MouseEvent,
@@ -50,6 +52,19 @@ interface CalendarCell {
 }
 
 const WEEK_DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function weekdayLabelFromDate(date: Date): string {
+  const jsDay = date.getDay();
+  return WEEK_DAYS[jsDay === 0 ? 6 : jsDay - 1];
+}
+
+function dateKeyFromDate(date: Date): string {
+  return `${date.getFullYear()}-${date.getMonth() + 1}-${date.getDate()}`;
+}
+
+function startOfLocalDay(date: Date): Date {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
 const MONTH_NAMES = [
   "January", "February", "March", "April", "May", "June",
   "July", "August", "September", "October", "November", "December",
@@ -182,6 +197,7 @@ interface CatalogRailProps {
   favorites: string[];
   onToggleFavorite?: (id: string) => void;
   onToggleWatchlist?: (id: string) => void;
+  onMarkWatched?: (item: MediaItem, watched: boolean) => void;
   onContextMenu?: (e: React.MouseEvent, media: MediaItem) => void;
 }
 
@@ -192,6 +208,7 @@ function CatalogRail({
   favorites,
   onToggleFavorite,
   onToggleWatchlist,
+  onMarkWatched,
   onContextMenu,
 }: CatalogRailProps) {
   const railRef = useRef<HTMLDivElement>(null);
@@ -256,6 +273,7 @@ function CatalogRail({
               isFavorite={favorites.includes(item.id)}
               onToggleFavorite={onToggleFavorite}
               onToggleWatchlist={onToggleWatchlist}
+              onMarkWatched={onMarkWatched}
               onContextMenu={onContextMenu ? (e, m) => onContextMenu(e, m) : undefined}
             />
           </div>
@@ -277,13 +295,21 @@ export function HomeView({
   onToggleFavorite,
   watchlist,
   onToggleWatchlist,
+  onMarkWatched,
   onNavigateTab,
   onContextMenu,
   continueDismissed = [],
 }: HomeViewProps) {
+  const [isPhone, setIsPhone] = useState(() => isPhoneUi());
   const now = new Date();
+  useEffect(() => {
+    const sync = () => setIsPhone(isPhoneUi());
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, []);
   const [viewYear, setViewYear] = useState(now.getFullYear());
   const [viewMonth, setViewMonth] = useState(now.getMonth());
+  const [weekStart, setWeekStart] = useState(() => startOfLocalDay(now));
   const [calendarFilter, setCalendarFilter] = useState<CalendarMediaFilter>("all");
   const [aniListUserWatching, setAniListUserWatching] = useState<UserListProgressEntry[]>(() =>
     StorageService.getUserWatchingCache()
@@ -320,7 +346,19 @@ export function HomeView({
 
   useEffect(() => {
     let cancelled = false;
-    const cacheKey = `stream_airing_${viewYear}_${viewMonth}_${myListsOnly ? "mine" : "all"}`;
+    const months = [{ year: viewYear, month: viewMonth }];
+    const weekEnd = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + 6);
+    if (weekEnd.getMonth() !== viewMonth || weekEnd.getFullYear() !== viewYear) {
+      months.push({ year: weekEnd.getFullYear(), month: weekEnd.getMonth() });
+    }
+    if (weekStart.getMonth() !== viewMonth || weekStart.getFullYear() !== viewYear) {
+      months.unshift({ year: weekStart.getFullYear(), month: weekStart.getMonth() });
+    }
+    const uniqueMonths = months.filter(
+      (m, i, arr) => arr.findIndex((x) => x.year === m.year && x.month === m.month) === i
+    );
+
+    const cacheKey = `stream_airing_${uniqueMonths.map((m) => `${m.year}_${m.month}`).join("_")}_${myListsOnly ? "mine" : "all"}`;
     const cached = StorageService.getMonthlyAiringCache(cacheKey);
     if (cached && cached.length > 0) {
       setAiringSchedule(cached);
@@ -329,25 +367,35 @@ export function HomeView({
       setScheduleLoading(true);
     }
 
-    const promises: Promise<AiringScheduleItem[]>[] = [
-      AniListService.fetchMonthlyAiringSchedule(viewYear, viewMonth, myListsOnly).catch(() => []),
-    ];
-
-    if (!myListsOnly) {
-      promises.push(TMDBService.fetchMonthlyTVSchedule(viewYear, viewMonth).catch(() => []));
-      promises.push(TMDBService.fetchMonthlyMovieSchedule(viewYear, viewMonth).catch(() => []));
-    }
-
-    Promise.all(promises)
-      .then(([animeSchedule = [], tvSchedule = [], movieSchedule = []]) => {
-        if (!cancelled) {
-          const combined: AiringScheduleItem[] = [
-            ...animeSchedule.map((a) => ({ ...a, mediaType: a.mediaType || ("anime" as MediaType) })),
-            ...tvSchedule,
-            ...movieSchedule,
-          ];
-          setAiringSchedule(combined);
+    Promise.all(
+      uniqueMonths.flatMap(({ year, month }) => {
+        const jobs: Promise<AiringScheduleItem[]>[] = [
+          AniListService.fetchMonthlyAiringSchedule(year, month, myListsOnly).catch(() => []),
+        ];
+        if (!myListsOnly) {
+          jobs.push(TMDBService.fetchMonthlyTVSchedule(year, month).catch(() => []));
+          jobs.push(TMDBService.fetchMonthlyMovieSchedule(year, month).catch(() => []));
         }
+        return jobs;
+      })
+    )
+      .then((chunks) => {
+        if (cancelled) return;
+        const combined: AiringScheduleItem[] = [];
+        const seen = new Set<string>();
+        for (const chunk of chunks) {
+          for (const item of chunk) {
+            const key = `${item.mediaType || "anime"}_${item.mediaId}_${item.dateKey || item.dayOfMonth}_${item.episode}`;
+            if (seen.has(key)) continue;
+            seen.add(key);
+            combined.push({
+              ...item,
+              mediaType: item.mediaType || ("anime" as MediaType),
+            });
+          }
+        }
+        setAiringSchedule(combined);
+        StorageService.saveMonthlyAiringCache(cacheKey, combined);
       })
       .finally(() => {
         if (!cancelled) setScheduleLoading(false);
@@ -356,7 +404,7 @@ export function HomeView({
     return () => {
       cancelled = true;
     };
-  }, [viewYear, viewMonth, myListsOnly, calendarFilter]);
+  }, [viewYear, viewMonth, weekStart, myListsOnly]);
 
   const filteredSchedule = useMemo(() => {
     if (calendarFilter === "all") return airingSchedule;
@@ -379,10 +427,34 @@ export function HomeView({
     [viewYear, viewMonth, scheduleByDate]
   );
 
+  const weekDays = useMemo(() => {
+    const todayKey = dateKeyFromDate(new Date());
+    return Array.from({ length: 7 }, (_, i) => {
+      const date = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + i);
+      const dateKey = dateKeyFromDate(date);
+      return {
+        date,
+        dateKey,
+        dayNumber: date.getDate(),
+        weekday: weekdayLabelFromDate(date),
+        isToday: dateKey === todayKey,
+        items: scheduleByDate.get(dateKey) || [],
+      };
+    });
+  }, [weekStart, scheduleByDate]);
+
   const shiftMonth = (delta: number) => {
     const d = new Date(viewYear, viewMonth + delta, 1);
     setViewYear(d.getFullYear());
     setViewMonth(d.getMonth());
+    setWeekStart(startOfLocalDay(d));
+  };
+
+  const shiftWeek = (delta: number) => {
+    const next = new Date(weekStart.getFullYear(), weekStart.getMonth(), weekStart.getDate() + delta * 7);
+    setWeekStart(startOfLocalDay(next));
+    setViewYear(next.getFullYear());
+    setViewMonth(next.getMonth());
   };
 
   const openScheduleShow = useCallback(
@@ -647,6 +719,7 @@ export function HomeView({
           onPlay={onPlayMedia}
           watchlist={watchlist}
           onToggleWatchlist={onToggleWatchlist}
+          onMarkWatched={onMarkWatched}
         />
       )}
 
@@ -912,7 +985,12 @@ export function HomeView({
                 {myListsOnly ? "My list" : "All airing"}
               </button>
               <div className="hm-cal-month-nav">
-                <button type="button" className="hm-icon-btn" onClick={() => shiftMonth(-1)} aria-label="Previous month">
+                <button
+                  type="button"
+                  className="hm-icon-btn"
+                  onClick={() => (isPhone ? shiftWeek(-1) : shiftMonth(-1))}
+                  aria-label={isPhone ? "Previous week" : "Previous month"}
+                >
                   <ChevronLeft size={16} />
                 </button>
                 <button
@@ -922,37 +1000,94 @@ export function HomeView({
                     const t = new Date();
                     setViewYear(t.getFullYear());
                     setViewMonth(t.getMonth());
+                    setWeekStart(startOfLocalDay(t));
                   }}
-                  title="Jump to this month"
+                  title={isPhone ? "Jump to this week" : "Jump to this month"}
                 >
-                  {MONTH_NAMES[viewMonth]} {viewYear}
+                  {isPhone
+                    ? `${weekDays[0].weekday} ${weekDays[0].dayNumber} – ${weekDays[6].weekday} ${weekDays[6].dayNumber}`
+                    : `${MONTH_NAMES[viewMonth]} ${viewYear}`}
                   {scheduleLoading ? " · …" : ""}
                 </button>
-                <button type="button" className="hm-icon-btn" onClick={() => shiftMonth(1)} aria-label="Next month">
+                <button
+                  type="button"
+                  className="hm-icon-btn"
+                  onClick={() => (isPhone ? shiftWeek(1) : shiftMonth(1))}
+                  aria-label={isPhone ? "Next week" : "Next month"}
+                >
                   <ChevronRight size={16} />
                 </button>
               </div>
             </div>
           </div>
 
-          <div className="hm-cal">
-            <div className="hm-cal-weekdays">
-              {WEEK_DAYS.map((d) => (
-                <div key={d} className="hm-cal-wd">
-                  {d}
+          <div className={`hm-cal ${isPhone ? "is-week-cards" : ""}`}>
+            {isPhone ? (
+              <div className="hm-cal-week">
+                {weekDays.map((day) => (
+                  <section
+                    key={`week_${day.dateKey}`}
+                    className={`hm-cal-week-day ${day.isToday ? "is-today" : ""}`}
+                  >
+                    <div className="hm-cal-week-label">
+                      <span className="hm-cal-week-num">{day.dayNumber}</span>
+                      <span className="hm-cal-week-meta">
+                        {day.weekday}
+                        {day.isToday ? " · Today" : ""}
+                      </span>
+                    </div>
+                    {day.items.length === 0 ? (
+                      <div className="hm-cal-week-empty">Nothing airing</div>
+                    ) : (
+                      <div className="hm-cal-card-grid">
+                        {day.items.map((item, idx) => {
+                          const type = item.mediaType || "anime";
+                          const badgeText = type === "movie" ? "Film" : type === "tv" ? `S${item.episode}` : `E${item.episode}`;
+                          return (
+                            <button
+                              type="button"
+                              key={`weekcard_${item.id}_${item.mediaId}_${idx}`}
+                              className={`hm-cal-mini-card type-${type}`}
+                              onClick={() => openScheduleShow(item)}
+                            >
+                              <span className="hm-cal-mini-poster">
+                                {(item.coverImage || item.bannerImage) ? (
+                                  <img src={item.coverImage || item.bannerImage} alt="" loading="lazy" />
+                                ) : null}
+                                <span className={`hm-cal-mini-badge badge-${type}`}>{badgeText}</span>
+                              </span>
+                              <span className={`hm-cal-mini-title ${item.isWatched ? "is-watched" : ""}`}>
+                                {item.mediaTitle}
+                              </span>
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </section>
+                ))}
+              </div>
+            ) : (
+              <>
+                <div className="hm-cal-weekdays">
+                  {WEEK_DAYS.map((d) => (
+                    <div key={d} className="hm-cal-wd">
+                      {d}
+                    </div>
+                  ))}
                 </div>
-              ))}
-            </div>
-            <div className="hm-cal-grid">
-              {calendarCells.map((cell, i) => (
-                <CalendarDayCell
-                  key={`cal_${cell.dateKey}_${cell.cellIndex}`}
-                  cell={cell}
-                  index={i}
-                  onOpenShow={openScheduleShow}
-                />
-              ))}
-            </div>
+                <div className="hm-cal-grid">
+                  {calendarCells.map((cell, i) => (
+                    <CalendarDayCell
+                      key={`cal_${cell.dateKey}_${cell.cellIndex}`}
+                      cell={cell}
+                      index={i}
+                      onOpenShow={openScheduleShow}
+                    />
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         </section>
 
@@ -966,6 +1101,7 @@ export function HomeView({
             favorites={favorites}
             onToggleFavorite={onToggleFavorite}
             onToggleWatchlist={onToggleWatchlist}
+            onMarkWatched={onMarkWatched}
             onContextMenu={onContextMenu}
           />
         </section>
@@ -979,6 +1115,7 @@ export function HomeView({
             favorites={favorites}
             onToggleFavorite={onToggleFavorite}
             onToggleWatchlist={onToggleWatchlist}
+            onMarkWatched={onMarkWatched}
             onContextMenu={onContextMenu}
           />
         </section>
@@ -992,6 +1129,7 @@ export function HomeView({
             favorites={favorites}
             onToggleFavorite={onToggleFavorite}
             onToggleWatchlist={onToggleWatchlist}
+            onMarkWatched={onMarkWatched}
             onContextMenu={onContextMenu}
           />
         </section>

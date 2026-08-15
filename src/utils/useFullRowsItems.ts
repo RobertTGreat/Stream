@@ -35,10 +35,13 @@ export function useFullRowsItems<T>(
   }, [minWidth, gap]);
 
   const displayItems = useMemo(() => {
-    if (!items || items.length <= columns) {
-      return items || [];
-    }
+    if (!items || items.length === 0) return [];
+    if (items.length <= columns) return items;
     const fullCount = Math.floor(items.length / columns) * columns;
+    // Keep a leftover last row on phones instead of dropping a whole row.
+    if (fullCount === 0 || items.length - fullCount >= Math.max(2, Math.floor(columns / 2))) {
+      return items;
+    }
     return items.slice(0, fullCount);
   }, [items, columns]);
 

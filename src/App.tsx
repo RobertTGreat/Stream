@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef, useMemo, lazy, Suspense } from "react";
-import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, useQuery, useQueryClient } from "@tanstack/react-query";
 import { ViewMode, MediaItem, Episode, StreamProgress, UserProfile, AppSettings, Collection, DownloadTask, LocalMediaItem, TorrentResult, MediaType, TorrentFileItem, StreamInfo, ScanLibraryResult } from "./types";
 import { StorageService } from "./services/storage";
 import { AniListService } from "./services/anilist";
@@ -19,10 +19,13 @@ import {
 
 import { TitleBar } from "./components/TitleBar";
 import { Sidebar } from "./components/Sidebar";
+import { MobileTopBar } from "./components/MobileTopBar";
+import { MobileBottomNav } from "./components/MobileBottomNav";
 import { VideoPlayer } from "./components/VideoPlayer";
 import { ContextMenu, ContextMenuState } from "./components/ContextMenu";
 import { CommandPalette } from "./components/CommandPalette";
 import { HomeView } from "./views/HomeView";
+import { isPhoneUi, isTabletUi } from "./utils/platform";
 
 // Code-split secondary views & heavy modals
 const AnimeView = lazy(() => import("./views/AnimeView").then((m) => ({ default: m.AnimeView })));
@@ -68,6 +71,13 @@ const queryClient = new QueryClient({
 const BROWSE_VIEWS: ViewMode[] = ["home", "anime", "movies", "tv", "library", "search", "collections", "stats", "downloads", "settings"];
 
 function MainApp() {
+  const queryClient = useQueryClient();
+  const [isPhone, setIsPhone] = useState(() => isPhoneUi());
+  const [isTablet, setIsTablet] = useState(() => isTabletUi());
+  const [pullDistance, setPullDistance] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const pullStartY = useRef<number | null>(null);
+  const contentRef = useRef<HTMLElement | null>(null);
   const [currentView, setCurrentView] = useState<ViewMode>("home");
   const [, setViewHistory] = useState<ViewMode[]>(["home"]);
   const [selectedMedia, setSelectedMedia] = useState<MediaItem | null>(null);
@@ -85,6 +95,32 @@ function MainApp() {
   const [profile, setProfile] = useState<UserProfile>(() => StorageService.getProfile());
   const [settings, setSettings] = useState<AppSettings>(() => StorageService.getSettings());
   const [watchProgress, setWatchProgress] = useState<StreamProgress[]>(() => StorageService.getWatchProgress());
+
+  useEffect(() => {
+    const sync = () => {
+      setIsPhone(isPhoneUi());
+      setIsTablet(isTabletUi());
+    };
+    window.addEventListener("resize", sync);
+    return () => window.removeEventListener("resize", sync);
+  }, []);
+
+  const refreshCatalog = useCallback(async () => {
+    if (isRefreshing) return;
+    setIsRefreshing(true);
+    try {
+      await Promise.all([
+        queryClient.invalidateQueries({ queryKey: ["trendingAnime"] }),
+        queryClient.invalidateQueries({ queryKey: ["trendingMovies"] }),
+        queryClient.invalidateQueries({ queryKey: ["trendingTv"] }),
+        queryClient.invalidateQueries({ queryKey: ["downloadTasks"] }),
+      ]);
+      await queryClient.refetchQueries({ type: "active" });
+    } finally {
+      setIsRefreshing(false);
+      setPullDistance(0);
+    }
+  }, [isRefreshing, queryClient]);
 
   // Theme accent (customizable purple / other)
   useEffect(() => {
@@ -439,7 +475,11 @@ function MainApp() {
 
     const title =
       overrides?.title ||
-      (ep ? `${media.title} Ep ${ep.episodeNumber}` : torrentModal.title || torrent.title);
+      (media.mediaType === "movie"
+        ? media.title
+        : ep
+          ? `${media.title} · Ep ${ep.episodeNumber}`
+          : media.title);
 
     setTorrentModal((prev) => ({ ...prev, isOpen: false }));
     setVideoPlayer({
@@ -467,8 +507,8 @@ function MainApp() {
         magnet_link: torrent.magnet_url,
         file_index: fileIdx,
         save_path: settings.downloadPath,
-        season: ep?.seasonNumber,
-        episode: ep?.episodeNumber,
+        season: media.mediaType === "movie" ? undefined : ep?.seasonNumber,
+        episode: media.mediaType === "movie" ? undefined : ep?.episodeNumber,
       });
       if (streamGenRef.current !== gen) return false;
 
@@ -579,7 +619,9 @@ function MainApp() {
         startAt,
         statusLabel: startAt > 5
           ? `Searching indexers… will resume at ${Math.floor(startAt / 60)}m`
-          : "Searching Nyaa, SeaDex, Torrentio, and other indexers…",
+          : media.mediaType === "anime"
+            ? "Searching Nyaa, SeaDex, Torrentio, and other indexers…"
+            : "Searching Torrentio, YTS, and other movie/TV indexers…",
       });
     }
 
@@ -598,7 +640,12 @@ function MainApp() {
           usable,
           settings.preferredQuality || "1080p",
           settings.minSeeders ?? 1,
-          playEpisode?.episodeNumber
+          media.mediaType === "movie" ? undefined : playEpisode?.episodeNumber,
+          {
+            mediaType: media.mediaType,
+            season: media.mediaType === "movie" ? undefined : playEpisode?.seasonNumber || 1,
+            year: media.year,
+          }
         );
         if (best) {
           setTorrentModal((prev) => ({
@@ -611,8 +658,22 @@ function MainApp() {
           await startStreamWithFile(best, resumePoint?.fileIndex, {
             media,
             ep: playEpisode,
-            title: playEpisode ? `${media.title} Ep ${playEpisode.episodeNumber}` : media.title,
+            title: playEpisode && media.mediaType !== "movie"
+              ? `${media.title} Ep ${playEpisode.episodeNumber}`
+              : media.title,
             startAt,
+          });
+          return;
+        }
+        if (usable.length === 0) {
+          setVideoPlayer({
+            isOpen: true,
+            media,
+            episode: playEpisode,
+            streamUrl: "",
+            error: media.mediaType === "anime"
+              ? "No torrents found for this title."
+              : "No movie/TV torrents found. Try again in a moment.",
           });
           return;
         }
@@ -657,9 +718,18 @@ function MainApp() {
 
   const handleSelectDownloadTorrent = async (torrent: TorrentResult) => {
     setTorrentModal((prev) => ({ ...prev, isOpen: false }));
+    const media = torrentModal.media;
+    const ep = torrentModal.ep;
+    const displayTitle = media
+      ? media.mediaType === "movie"
+        ? media.title
+        : ep
+          ? `${media.title} · Ep ${ep.episodeNumber}`
+          : media.title
+      : torrent.title;
     await invokeTauri("start_download_cmd", {
-      title: torrent.title,
-      media_type: torrent.media_type,
+      title: displayTitle,
+      media_type: media?.mediaType || torrent.media_type,
       magnet_link: torrent.magnet_url,
       save_path: settings.downloadPath,
       seeders: torrent.seeders,
@@ -683,8 +753,20 @@ function MainApp() {
   const handleToggleWatchlist = (id: string) => {
     const cached = StorageService.getMediaCache()[id];
     if (cached) StorageService.cacheMedia(cached);
+    const wasIn = StorageService.isInWatchlist(id);
     StorageService.toggleWatchlist(id);
     setWatchlist(StorageService.getWatchlist());
+    if (cached?.anilistId && profile.anilistToken) {
+      void AniListService.updateAniListProgress({
+        anilistId: cached.anilistId,
+        episodeNumber: 0,
+        status: wasIn ? "DROPPED" : "PLANNING",
+      }).catch(() => undefined);
+    }
+  };
+
+  const handleMarkCardWatched = (media: MediaItem, watched: boolean) => {
+    void handleMarkWatched(media, undefined, watched);
   };
 
   const handleMarkWatched = async (media: MediaItem, ep?: Episode, markAsWatched = true) => {
@@ -959,25 +1041,74 @@ function MainApp() {
   );
 
   return (
-    <div className="app-container">
-      <TitleBar
-        profile={profile}
-        onOpenSearch={() => setIsCommandPaletteOpen(true)}
-        onNavigate={navigateTo}
-        currentViewTitle={currentView === "media-detail" && selectedMedia ? selectedMedia.title : currentView}
-      />
+    <div className={`app-container ${isPhone ? "is-mobile-shell" : ""} ${isTablet ? "is-tablet-shell" : ""}`}>
+      {isPhone ? (
+        <MobileTopBar
+          profile={profile}
+          currentView={currentView}
+          currentViewTitle={currentView === "media-detail" && selectedMedia ? selectedMedia.title : undefined}
+          onNavigate={navigateTo}
+          onBack={goBack}
+        />
+      ) : (
+        <TitleBar
+          profile={profile}
+          onOpenSearch={() => setIsCommandPaletteOpen(true)}
+          onNavigate={navigateTo}
+          currentViewTitle={currentView === "media-detail" && selectedMedia ? selectedMedia.title : currentView}
+        />
+      )}
 
       <div className="app-main-layout">
-        <Sidebar
-          currentView={currentView}
-          onNavigate={navigateTo}
-          activeDownloads={activeDownloads}
-          overallProgress={overallProgress}
-          onOpenAniListModal={() => setShowAniListModal(true)}
-          aniListConnected={Boolean(profile.anilistUser)}
-        />
+        {!isPhone && (
+          <Sidebar
+            labeled={isTablet}
+            currentView={currentView}
+            onNavigate={navigateTo}
+            activeDownloads={activeDownloads}
+            overallProgress={overallProgress}
+            onOpenAniListModal={() => setShowAniListModal(true)}
+            aniListConnected={Boolean(profile.anilistUser)}
+          />
+        )}
 
-        <main className="app-content-body">
+        <main
+          ref={contentRef}
+          className="app-content-body"
+          onTouchStart={(e) => {
+            if (!isPhone || isRefreshing || videoPlayer.isOpen) return;
+            const el = contentRef.current;
+            if (!el || el.scrollTop > 2) {
+              pullStartY.current = null;
+              return;
+            }
+            pullStartY.current = e.touches[0].clientY;
+          }}
+          onTouchMove={(e) => {
+            if (!isPhone || isRefreshing || pullStartY.current == null) return;
+            const el = contentRef.current;
+            if (!el || el.scrollTop > 2) return;
+            const delta = e.touches[0].clientY - pullStartY.current;
+            if (delta > 0) {
+              setPullDistance(Math.min(96, delta * 0.45));
+            }
+          }}
+          onTouchEnd={() => {
+            if (!isPhone) return;
+            const shouldRefresh = pullDistance > 56;
+            pullStartY.current = null;
+            if (shouldRefresh) {
+              void refreshCatalog();
+            } else {
+              setPullDistance(0);
+            }
+          }}
+        >
+          {isPhone && (pullDistance > 0 || isRefreshing) && (
+            <div className={`mobile-pull-refresh ${isRefreshing ? "is-refreshing" : ""}`} style={{ height: isRefreshing ? 48 : pullDistance }}>
+              <span>{isRefreshing ? "Refreshing…" : pullDistance > 56 ? "Release to refresh" : "Pull to refresh"}</span>
+            </div>
+          )}
           {currentView === "home" && (
             <HomeView
               spotlightMedia={spotlightMedia}
@@ -1032,6 +1163,7 @@ function MainApp() {
               onToggleFavorite={handleToggleFavorite}
               watchlist={watchlist}
               onToggleWatchlist={handleToggleWatchlist}
+              onMarkWatched={handleMarkCardWatched}
               onNavigateTab={(tab) => navigateTo(tab)}
               onContextMenu={handleOpenContextMenu}
               continueDismissed={continueDismissed}
@@ -1049,6 +1181,7 @@ function MainApp() {
                 favorites={favorites}
                 onToggleFavorite={handleToggleFavorite}
                 onToggleWatchlist={handleToggleWatchlist}
+                onMarkWatched={handleMarkCardWatched}
                 onSearch={(q, g, s) => handleGlobalSearch(q, "anime", g, undefined, s)}
                 onContextMenu={handleOpenContextMenu}
               />
@@ -1064,6 +1197,7 @@ function MainApp() {
                 favorites={favorites}
                 onToggleFavorite={handleToggleFavorite}
                 onToggleWatchlist={handleToggleWatchlist}
+                onMarkWatched={handleMarkCardWatched}
                 onSearch={(q, g, s) => handleGlobalSearch(q, "movie", g, undefined, s)}
                 onContextMenu={handleOpenContextMenu}
               />
@@ -1079,6 +1213,7 @@ function MainApp() {
                 favorites={favorites}
                 onToggleFavorite={handleToggleFavorite}
                 onToggleWatchlist={handleToggleWatchlist}
+                onMarkWatched={handleMarkCardWatched}
                 onSearch={(q, g, s) => handleGlobalSearch(q, "tv", g, undefined, s)}
                 onContextMenu={handleOpenContextMenu}
               />
@@ -1128,6 +1263,7 @@ function MainApp() {
                 favorites={favorites}
                 onToggleFavorite={handleToggleFavorite}
                 onToggleWatchlist={handleToggleWatchlist}
+                onMarkWatched={handleMarkCardWatched}
                 onContextMenu={handleOpenContextMenu}
               />
             )}
@@ -1145,6 +1281,7 @@ function MainApp() {
                 favorites={favorites}
                 onToggleFavorite={handleToggleFavorite}
                 onToggleWatchlist={handleToggleWatchlist}
+                onMarkWatched={handleMarkCardWatched}
                 onContextMenu={handleOpenContextMenu}
                 onAddNewCollection={(name, description) => {
                   persistCollections([
@@ -1265,6 +1402,7 @@ function MainApp() {
                 onToggleFavorite={handleToggleFavorite}
                 isInWatchlist={watchlist.includes(selectedMedia.id)}
                 onToggleWatchlist={handleToggleWatchlist}
+                onMarkWatched={handleMarkCardWatched}
                 watchedEpisodes={getWatchedEpisodesMap(selectedMedia.id)}
                 onContextMenu={handleOpenContextMenu}
                 onSelectMedia={handleSelectMedia}
@@ -1273,6 +1411,17 @@ function MainApp() {
           </Suspense>
         </main>
       </div>
+
+      {isPhone && (
+        <MobileBottomNav
+          currentView={currentView}
+          onNavigate={navigateTo}
+          onOpenSearch={() => setIsCommandPaletteOpen(true)}
+          activeDownloads={activeDownloads}
+          onOpenAniListModal={() => setShowAniListModal(true)}
+          aniListConnected={Boolean(profile.anilistUser)}
+        />
+      )}
 
       {/* Command Palette */}
       <CommandPalette
