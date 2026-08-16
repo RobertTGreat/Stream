@@ -6357,17 +6357,39 @@ input:checked + .toggle-slider:before {
   overflow: visible;
 }
 
-/* Hero — full-bleed, sparse */
+/* Hero — continuous slidable carousel */
 .home-hero {
   position: relative;
   width: 100%;
   min-height: 420px;
   height: min(52vh, 520px);
   display: flex;
-  align-items: flex-end;
   overflow: hidden;
   margin-bottom: 8px;
   background: var(--color-bg);
+  user-select: none;
+  cursor: grab;
+}
+
+.home-hero:active {
+  cursor: grabbing;
+}
+
+.home-hero-slider-track {
+  display: flex;
+  width: 100%;
+  height: 100%;
+  touch-action: pan-y;
+}
+
+.home-hero-slide {
+  position: relative;
+  flex: 0 0 100%;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  align-items: flex-end;
+  overflow: hidden;
 }
 
 .home-hero-media {
@@ -6380,20 +6402,18 @@ input:checked + .toggle-slider:before {
   height: 100%;
   object-fit: cover;
   object-position: center 22%;
-  transform: scale(1.18);
-  transform-origin: center 22%;
+  transform: scale(1.08);
   image-rendering: auto;
   -webkit-backface-visibility: hidden;
   backface-visibility: hidden;
-  transition: none !important;
-  animation: none !important;
+  pointer-events: none;
 }
 
 .home-hero-scrim {
   position: absolute;
   inset: 0;
   background:
-    linear-gradient(90deg, rgba(9, 9, 11, 0.92) 0%, rgba(9, 9, 11, 0.55) 42%, rgba(9, 9, 11, 0.15) 72%, transparent 100%),
+    linear-gradient(90deg, rgba(9, 9, 11, 0.94) 0%, rgba(9, 9, 11, 0.6) 42%, rgba(9, 9, 11, 0.18) 72%, transparent 100%),
     linear-gradient(0deg, rgba(9, 9, 11, 1) 0%, rgba(9, 9, 11, 0.35) 35%, transparent 65%);
 }
 
@@ -6408,6 +6428,21 @@ input:checked + .toggle-slider:before {
   flex-direction: column;
   align-items: flex-start;
   gap: 12px;
+}
+
+.home-hero-pager-overlay {
+  position: absolute;
+  bottom: 36px;
+  right: 32px;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  background: rgba(14, 14, 18, 0.65);
+  backdrop-filter: blur(12px);
+  padding: 6px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
 }
 
 .home-hero-body > * {

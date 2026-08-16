@@ -1,5 +1,5 @@
-import { useState, useRef, useEffect } from "react";
-import { Search, Flame, TrendingUp, Star, Sparkles } from "lucide-react";
+import { useState } from "react";
+import { Flame, TrendingUp, Star, Sparkles } from "lucide-react";
 import { MediaItem } from "../types";
 import { MediaCard } from "../components/MediaCard";
 import { useFullRowsItems } from "../utils/useFullRowsItems";
@@ -43,34 +43,17 @@ export function AnimeView({
 }: AnimeViewProps) {
   const [selectedGenre, setSelectedGenre] = useState("All");
   const [selectedSort, setSelectedSort] = useState<"TRENDING_DESC" | "POPULARITY_DESC" | "SCORE_DESC" | "START_DATE_DESC">("TRENDING_DESC");
-  const [searchQuery, setSearchQuery] = useState("");
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { containerRef, displayItems } = useFullRowsItems(items, 118, 10);
 
   const handleGenreClick = (genre: string) => {
     setSelectedGenre(genre);
-    onSearch(searchQuery, genre === "All" ? undefined : genre, selectedSort);
+    onSearch("", genre === "All" ? undefined : genre, selectedSort);
   };
 
   const handleSortClick = (sortId: "TRENDING_DESC" | "POPULARITY_DESC" | "SCORE_DESC" | "START_DATE_DESC") => {
     setSelectedSort(sortId);
-    onSearch(searchQuery, selectedGenre === "All" ? undefined : selectedGenre, sortId);
+    onSearch("", selectedGenre === "All" ? undefined : selectedGenre, sortId);
   };
-
-  const handleSearchChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const val = e.target.value;
-    setSearchQuery(val);
-    if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => {
-      onSearch(val, selectedGenre === "All" ? undefined : selectedGenre, selectedSort);
-    }, 300);
-  };
-
-  useEffect(() => {
-    return () => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-    };
-  }, []);
 
   return (
     <div className="view-container catalog-view">
@@ -105,17 +88,6 @@ export function AnimeView({
               {genre}
             </button>
           ))}
-        </div>
-
-        <div className="search-field catalog-search-field">
-          <Search size={14} />
-          <input
-            type="text"
-            placeholder="Filter anime..."
-            value={searchQuery}
-            onChange={handleSearchChange}
-            className="catalog-input"
-          />
         </div>
       </div>
 
