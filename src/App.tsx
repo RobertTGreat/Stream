@@ -134,6 +134,17 @@ function MainApp() {
 
   const [searchResults, setSearchResults] = useState<MediaItem[]>([]);
   const [isSearching, setIsSearching] = useState(false);
+  const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(() => {
+    return localStorage.getItem("stream_sidebar_collapsed") === "true";
+  });
+
+  const toggleSidebarCollapse = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      localStorage.setItem("stream_sidebar_collapsed", String(next));
+      return next;
+    });
+  }, []);
 
   // Command Palette & Modals
   const [isCommandPaletteOpen, setIsCommandPaletteOpen] = useState(false);
@@ -1062,7 +1073,8 @@ function MainApp() {
       <div className="app-main-layout">
         {!isPhone && (
           <Sidebar
-            labeled={isTablet}
+            collapsed={sidebarCollapsed}
+            onToggleCollapse={toggleSidebarCollapse}
             currentView={currentView}
             onNavigate={navigateTo}
             activeDownloads={activeDownloads}

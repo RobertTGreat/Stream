@@ -11,6 +11,8 @@ import {
   Download,
   Settings,
   Sparkles,
+  PanelLeftClose,
+  PanelLeftOpen,
 } from "lucide-react";
 import { ViewMode } from "../types";
 import { Tooltip } from "./Tooltip";
@@ -22,7 +24,8 @@ interface SidebarProps {
   overallProgress: number;
   onOpenAniListModal: () => void;
   aniListConnected: boolean;
-  labeled?: boolean;
+  collapsed?: boolean;
+  onToggleCollapse?: () => void;
 }
 
 export function Sidebar({
@@ -32,7 +35,8 @@ export function Sidebar({
   overallProgress,
   onOpenAniListModal,
   aniListConnected,
-  labeled = false,
+  collapsed = false,
+  onToggleCollapse,
 }: SidebarProps) {
   const navItems: { id: ViewMode; label: string; hint: string; icon: React.ComponentType<{ size?: number }> }[] = [
     { id: "home", label: "Home", hint: "Spotlight & Trending", icon: Home },
@@ -45,9 +49,24 @@ export function Sidebar({
     { id: "stats", label: "Statistics", hint: "Watch History & Stats", icon: BarChart2 },
   ];
 
+  const isExpanded = !collapsed;
+
   return (
-    <aside className={`sidebar-rail ${labeled ? "is-labeled" : ""}`}>
-      {labeled && <div className="rail-brand">Stream</div>}
+    <aside className={`sidebar-rail ${isExpanded ? "is-expanded is-labeled" : "is-collapsed"}`}>
+      {onToggleCollapse && (
+        <div className="rail-toggle-row">
+          <button
+            type="button"
+            className="rail-toggle-btn"
+            onClick={onToggleCollapse}
+            title={isExpanded ? "Collapse Sidebar" : "Expand Sidebar"}
+            aria-label={isExpanded ? "Collapse Sidebar" : "Expand Sidebar"}
+          >
+            {isExpanded ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+          </button>
+        </div>
+      )}
+
       <div className="rail-nav">
         {navItems.map((item) => {
           const IconComponent = item.icon;
@@ -60,12 +79,12 @@ export function Sidebar({
               aria-pressed={isActive}
               onClick={() => onNavigate(item.id)}
             >
-              <IconComponent size={labeled ? 20 : 18} />
-              {labeled && <span className="rail-label">{item.label}</span>}
+              <IconComponent size={isExpanded ? 20 : 18} />
+              {isExpanded && <span className="rail-label">{item.label}</span>}
               {isActive && <div className="active-indicator" />}
             </button>
           );
-          if (labeled) return <div key={item.id}>{button}</div>;
+          if (isExpanded) return <div key={item.id} className="rail-btn-wrapper">{button}</div>;
           return (
             <Tooltip key={item.id} label={item.label} hint={item.hint} side="right">
               {button}
@@ -76,7 +95,7 @@ export function Sidebar({
 
       <div className="rail-footer">
         {/* AniList sync indicator button */}
-        {labeled ? (
+        {isExpanded ? (
           <button
             type="button"
             className={`rail-btn ${aniListConnected ? "text-purple-400" : "text-zinc-500"}`}
@@ -106,7 +125,7 @@ export function Sidebar({
         )}
 
         {/* Downloads slot */}
-        {labeled ? (
+        {isExpanded ? (
           <>
             <button
               type="button"

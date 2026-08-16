@@ -74,54 +74,49 @@ export function MoviesView({
 
   return (
     <div className="view-container catalog-view">
-      <div className="catalog-header">
-        <div className="title-area">
-          <h1>Cinema Movies</h1>
-          <p className="subtitle">Powered by TMDB Cinema Database</p>
+      <div className="catalog-toolbar">
+        <div className="sort-pills-bar">
+          {SORT_OPTIONS.map((opt) => {
+            const Icon = opt.icon;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                className={`sort-pill-btn ${selectedSort === opt.id ? "active" : ""}`}
+                onClick={() => handleSortClick(opt.id)}
+              >
+                <Icon size={12} />
+                <span>{opt.label}</span>
+              </button>
+            );
+          })}
         </div>
 
-        <div className="filter-controls">
-          <div className="sort-pills-bar">
-            {SORT_OPTIONS.map((opt) => {
-              const Icon = opt.icon;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  className={`sort-pill-btn ${selectedSort === opt.id ? "active" : ""}`}
-                  onClick={() => handleSortClick(opt.id)}
-                >
-                  <Icon size={12} />
-                  <span>{opt.label}</span>
-                </button>
-              );
-            })}
-          </div>
+        <div className="genre-divider" />
 
-          <div className="search-field">
-            <Search size={14} />
-            <input
-              type="text"
-              placeholder="Search movies..."
-              value={searchQuery}
-              onChange={handleSearch}
-              className="catalog-input"
-            />
-          </div>
+        <div className="genre-pills-bar">
+          {MOVIE_GENRES.map((genre) => (
+            <button
+              key={genre}
+              type="button"
+              className={`genre-pill-btn ${selectedGenre === genre ? "active" : ""}`}
+              onClick={() => handleGenreClick(genre)}
+            >
+              {genre}
+            </button>
+          ))}
         </div>
-      </div>
 
-      <div className="genre-pills-bar">
-        {MOVIE_GENRES.map((genre) => (
-          <button
-            key={genre}
-            type="button"
-            className={`genre-pill-btn ${selectedGenre === genre ? "active" : ""}`}
-            onClick={() => handleGenreClick(genre)}
-          >
-            {genre}
-          </button>
-        ))}
+        <div className="search-field catalog-search-field">
+          <Search size={14} />
+          <input
+            type="text"
+            placeholder="Filter movies..."
+            value={searchQuery}
+            onChange={handleSearch}
+            className="catalog-input"
+          />
+        </div>
       </div>
 
       {isLoading ? (

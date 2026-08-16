@@ -438,15 +438,58 @@ input, select {
 
 /* Sidebar Navigation Rail (Icon-Only) */
 .sidebar-rail {
-  width: var(--sidebar-width);
+  width: var(--sidebar-width, 60px);
   height: 100%;
   background: var(--color-bg-elevated);
   border-right: 1px solid var(--color-border);
   display: flex;
   flex-direction: column;
   align-items: center;
-  padding: 12px 0;
+  padding: 10px 0 calc(12px + env(safe-area-inset-bottom, 0px));
   z-index: 20;
+  transition: width 220ms cubic-bezier(0.2, 0.8, 0.2, 1), padding 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+  overflow-x: hidden;
+  overflow-y: auto;
+}
+
+.sidebar-rail.is-expanded {
+  width: 200px;
+  align-items: stretch;
+  padding: 10px 10px calc(14px + env(safe-area-inset-bottom, 0px));
+}
+
+.sidebar-rail.is-collapsed {
+  width: 60px;
+  align-items: center;
+}
+
+.rail-toggle-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  width: 100%;
+  padding: 2px 6px 8px;
+  margin-bottom: 4px;
+}
+
+.sidebar-rail.is-collapsed .rail-toggle-row {
+  justify-content: center;
+  padding: 2px 0 8px;
+}
+
+.rail-toggle-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: var(--radius-sm);
+  display: grid;
+  place-items: center;
+  color: var(--color-text-muted);
+  transition: var(--transition-fast);
+}
+
+.rail-toggle-btn:hover {
+  background: var(--color-surface-hover);
+  color: var(--color-text);
 }
 
 .brand-logo {
@@ -475,6 +518,15 @@ input, select {
   gap: 6px;
   width: 100%;
   align-items: center;
+  flex: 1;
+}
+
+.sidebar-rail.is-expanded .rail-nav {
+  align-items: stretch;
+}
+
+.rail-btn-wrapper {
+  width: 100%;
 }
 
 .rail-btn {
@@ -486,6 +538,31 @@ input, select {
   color: var(--color-text-muted);
   position: relative;
   transition: var(--transition-fast);
+}
+
+.sidebar-rail.is-expanded .rail-btn {
+  width: 100%;
+  height: 42px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 12px;
+  padding: 0 12px;
+  border-radius: 12px;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.sidebar-rail.is-expanded .rail-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.sidebar-rail.is-expanded .download-badge {
+  position: static;
+  margin-left: auto;
 }
 
 .rail-btn:hover {
@@ -545,6 +622,7 @@ input, select {
 }
 
 .rail-btn-ext.hover-imdb:hover {
+  color: #2e51a2;
   background: rgba(245, 197, 24, 0.16);
 }
 
@@ -565,6 +643,11 @@ input, select {
   gap: 8px;
   align-items: center;
   width: 100%;
+  padding-bottom: env(safe-area-inset-bottom, 0px);
+}
+
+.sidebar-rail.is-expanded .rail-footer {
+  align-items: stretch;
 }
 
 .queue-slot {
@@ -2299,32 +2382,46 @@ input, select {
   text-overflow: ellipsis;
 }
 
-/* Catalog Views & Filters */
-.catalog-header {
+/* Catalog Views & Unified Toolbar */
+.catalog-toolbar {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  margin-bottom: 20px;
+  gap: 12px;
+  margin-bottom: 24px;
+  width: 100%;
+  min-width: 0;
 }
 
-.title-area h1 {
-  font-size: 22px;
-  font-weight: 800;
+.sort-pills-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-shrink: 0;
 }
 
-.subtitle {
-  color: var(--color-text-dim);
-  font-size: 11px;
+.genre-divider {
+  width: 1px;
+  height: 22px;
+  background: var(--color-border);
+  flex-shrink: 0;
 }
-
-
 
 .genre-pills-bar {
   display: flex;
+  align-items: center;
   gap: 8px;
   overflow-x: auto;
-  padding-bottom: 8px;
-  margin-bottom: 24px;
+  overflow-y: hidden;
+  white-space: nowrap;
+  flex: 1;
+  min-width: 0;
+  padding: 4px 2px;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+}
+
+.genre-pills-bar::-webkit-scrollbar {
+  display: none;
 }
 
 .genre-pill-btn {
@@ -2336,6 +2433,7 @@ input, select {
   font-size: 11px;
   font-weight: 500;
   white-space: nowrap;
+  flex-shrink: 0;
   transition: var(--transition-fast);
 }
 
@@ -2349,6 +2447,11 @@ input, select {
   color: #000000;
   border-color: #ffffff;
   font-weight: 600;
+}
+
+.catalog-search-field {
+  flex-shrink: 0;
+  width: 200px;
 }
 
 /* ═══════════════════════════════════════════
@@ -9414,7 +9517,7 @@ html.is-tablet body {
 }
 
 .app-container.is-tablet-shell {
-  --sidebar-width: 196px;
+  --sidebar-width: 60px;
   --titlebar-height: 48px;
 }
 
@@ -9430,55 +9533,12 @@ html.is-tablet body {
   font-size: 14px;
 }
 
-.app-container.is-tablet-shell .sidebar-rail.is-labeled {
-  width: var(--sidebar-width);
-  align-items: stretch;
-  padding: 16px 10px 18px;
-  gap: 8px;
+.app-container.is-tablet-shell .sidebar-rail.is-expanded {
+  width: 196px;
 }
 
-.app-container.is-tablet-shell .rail-brand {
-  font-size: 18px;
-  font-weight: 800;
-  letter-spacing: -0.04em;
-  color: #fff;
-  padding: 4px 10px 14px;
-}
-
-.app-container.is-tablet-shell .rail-nav,
-.app-container.is-tablet-shell .rail-footer {
-  align-items: stretch;
-  gap: 4px;
-}
-
-.app-container.is-tablet-shell .sidebar-rail.is-labeled .rail-btn {
-  width: 100%;
-  height: 44px;
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 12px;
-  padding: 0 12px;
-  border-radius: 12px;
-  font-size: 14px;
-  font-weight: 600;
-}
-
-.app-container.is-tablet-shell .rail-label {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.app-container.is-tablet-shell .active-indicator {
-  top: 10px;
-  bottom: 10px;
-}
-
-.app-container.is-tablet-shell .download-badge {
-  position: static;
-  margin-left: auto;
+.app-container.is-tablet-shell .sidebar-rail.is-collapsed {
+  width: 60px;
 }
 
 .app-container.is-tablet-shell .catalog-grid {

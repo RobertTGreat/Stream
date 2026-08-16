@@ -74,54 +74,49 @@ export function TvView({
 
   return (
     <div className="view-container catalog-view">
-      <div className="catalog-header">
-        <div className="title-area">
-          <h1>TV Shows & Series</h1>
-          <p className="subtitle">Powered by TMDB Series Index</p>
+      <div className="catalog-toolbar">
+        <div className="sort-pills-bar">
+          {SORT_OPTIONS.map((opt) => {
+            const Icon = opt.icon;
+            return (
+              <button
+                key={opt.id}
+                type="button"
+                className={`sort-pill-btn ${selectedSort === opt.id ? "active" : ""}`}
+                onClick={() => handleSortClick(opt.id)}
+              >
+                <Icon size={12} />
+                <span>{opt.label}</span>
+              </button>
+            );
+          })}
         </div>
 
-        <div className="filter-controls">
-          <div className="sort-pills-bar">
-            {SORT_OPTIONS.map((opt) => {
-              const Icon = opt.icon;
-              return (
-                <button
-                  key={opt.id}
-                  type="button"
-                  className={`sort-pill-btn ${selectedSort === opt.id ? "active" : ""}`}
-                  onClick={() => handleSortClick(opt.id)}
-                >
-                  <Icon size={12} />
-                  <span>{opt.label}</span>
-                </button>
-              );
-            })}
-          </div>
+        <div className="genre-divider" />
 
-          <div className="search-field">
-            <Search size={14} />
-            <input
-              type="text"
-              placeholder="Search TV shows..."
-              value={searchQuery}
-              onChange={handleSearch}
-              className="catalog-input"
-            />
-          </div>
+        <div className="genre-pills-bar">
+          {TV_GENRES.map((genre) => (
+            <button
+              key={genre}
+              type="button"
+              className={`genre-pill-btn ${selectedGenre === genre ? "active" : ""}`}
+              onClick={() => handleGenreClick(genre)}
+            >
+              {genre}
+            </button>
+          ))}
         </div>
-      </div>
 
-      <div className="genre-pills-bar">
-        {TV_GENRES.map((genre) => (
-          <button
-            key={genre}
-            type="button"
-            className={`genre-pill-btn ${selectedGenre === genre ? "active" : ""}`}
-            onClick={() => handleGenreClick(genre)}
-          >
-            {genre}
-          </button>
-        ))}
+        <div className="search-field catalog-search-field">
+          <Search size={14} />
+          <input
+            type="text"
+            placeholder="Filter TV series..."
+            value={searchQuery}
+            onChange={handleSearch}
+            className="catalog-input"
+          />
+        </div>
       </div>
 
       {isLoading ? (

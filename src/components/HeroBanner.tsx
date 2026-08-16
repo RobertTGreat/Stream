@@ -43,8 +43,29 @@ export function HeroBanner({
     item.episodesCount && item.episodesCount > 1 ? `${item.episodesCount} eps` : null,
   ].filter(Boolean);
 
+  const handleDragEnd = (
+    _event: MouseEvent | TouchEvent | PointerEvent,
+    info: { offset: { x: number; y: number }; velocity: { x: number; y: number } }
+  ) => {
+    const swipeThreshold = 50;
+    if (info.offset.x < -swipeThreshold || info.velocity.x < -400) {
+      // Swiped left -> Next
+      setCurrentIndex((p) => (p + 1) % items.length);
+    } else if (info.offset.x > swipeThreshold || info.velocity.x > 400) {
+      // Swiped right -> Prev
+      setCurrentIndex((p) => (p - 1 + items.length) % items.length);
+    }
+  };
+
   return (
-    <section className="home-hero" aria-label="Featured">
+    <motion.section
+      className="home-hero"
+      aria-label="Featured"
+      drag="x"
+      dragConstraints={{ left: 0, right: 0 }}
+      dragElastic={0.2}
+      onDragEnd={handleDragEnd}
+    >
       <div className="home-hero-media">
         <img
           key={item.id}
@@ -53,6 +74,7 @@ export function HeroBanner({
           className="home-hero-img"
           decoding="async"
           fetchPriority="high"
+          draggable={false}
         />
         <div className="home-hero-scrim" />
       </div>
@@ -142,6 +164,6 @@ export function HeroBanner({
           </div>
         )}
       </div>
-    </section>
+    </motion.section>
   );
 }
