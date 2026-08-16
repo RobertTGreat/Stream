@@ -5,7 +5,6 @@ import {
   Film,
   Monitor,
   FolderDown,
-  Search,
   Bookmark,
   BarChart2,
   Download,
@@ -44,7 +43,6 @@ export function Sidebar({
     { id: "movies", label: "Movies", hint: "TMDB Cinema Movies", icon: Film },
     { id: "tv", label: "TV Shows", hint: "Series & TV Shows", icon: Monitor },
     { id: "library", label: "Library", hint: "Scanned Local Folders", icon: FolderDown },
-    { id: "search", label: "Search", hint: "Global Search · Ctrl+K", icon: Search },
     { id: "collections", label: "Collections", hint: "Watchlist & Custom Lists", icon: Bookmark },
     { id: "stats", label: "Statistics", hint: "Watch History & Stats", icon: BarChart2 },
   ];
@@ -63,6 +61,7 @@ export function Sidebar({
             aria-label={isExpanded ? "Collapse Sidebar" : "Expand Sidebar"}
           >
             {isExpanded ? <PanelLeftClose size={18} /> : <PanelLeftOpen size={18} />}
+            {isExpanded && <span className="rail-toggle-label">Collapse</span>}
           </button>
         </div>
       )}
